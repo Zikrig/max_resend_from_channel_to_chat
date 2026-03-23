@@ -89,19 +89,11 @@ class MaxBot:
             logger.critical(f"Failed to get bot info: {e}")
             sys.exit(1)
 
-    async def send_message(self, chat_id: int, text: Optional[str] = None, attachments: Optional[List[Dict]] = None, link: Optional[Dict] = None) -> Optional[Dict]:
+    async def send_message(self, chat_id: int, text: str, attachments: Optional[List[Dict]] = None) -> Optional[Dict]:
         try:
-            payload = {}
-            if text is not None:
-                payload["text"] = text
-            elif link is not None:
-                # В некоторых API для forward/reply текст обязателен
-                payload["text"] = " "
-                
+            payload = {"text": text}
             if attachments:
                 payload["attachments"] = attachments
-            if link:
-                payload["link"] = link
             
             # В MAX для лички используется user_id, для групп/каналов - chat_id
             params = {}
@@ -111,8 +103,6 @@ class MaxBot:
                 params["chat_id"] = chat_id
             
             r = await self.client.post("/messages", params=params, json=payload)
-            if r.status_code != 200:
-                logger.error(f"Failed to send message: {r.status_code} {r.text}")
             r.raise_for_status()
             return r.json().get("message")
         except Exception as e:
@@ -153,15 +143,10 @@ class MaxBot:
             
         # Кнопка комментариев
         if include_comments and self.config.comments_chat_link:
-            url = self.config.comments_chat_link
-            # Если ссылка без протокола, добавляем https://max.ru/
-            if not url.startswith("http") and not url.startswith("max://"):
-                url = f"https://max.ru/{url.lstrip('@')}"
-                
             row.append({
                 "type": "link",
                 "text": "💬 Комментарии",
-                "url": url
+                "url": self.config.comments_chat_link
             })
             
         if row:
@@ -220,46 +205,46 @@ class MaxBot:
         text = msg.get("body", {}).get("text") or ""
         atts = msg.get("body", {}).get("attachments") or []
         
-        # 1. Добавляем кнопки к посту в канале (только Комментарии, без Рекламы)
-        new_atts = list(atts)
-        channel_buttons = self.get_standard_buttons(include_comments=True, include_ad=False)
-        if channel_buttons:
-            new_atts.append({
-                "type": "inline_keyboard",
-                "payload": {"buttons": channel_buttons}
-            })
-        
-        # Редактируем пост в канале
-        await self.edit_message(mid, text, new_atts)
-        logger.info(f"Post {mid} in channel edited with 'Comments' button.")
+        logger.info(f"Processing new channel post {mid}. Forwarding to comments chat first...")
 
-        # 2. Пересылаем в чат комментариев (Настоящая пересылка через link)
+        # 1. Сначала пересылаем в чат комментариев, чтобы получить mid копии
+        new_mid = None
         if self.config.comments_chat_id:
-            # Для чата комментариев используем кнопки с рекламой
+            copy_atts = list(atts)
             ad_buttons = self.get_standard_buttons(include_comments=False, include_ad=True)
-            copy_atts = []
             if ad_buttons:
                 copy_atts.append({
                     "type": "inline_keyboard",
                     "payload": {"buttons": ad_buttons}
                 })
             
-            # Используем поле link для пересылки
-            forward_link = {"mid": mid, "type": "forward"}
-            
-            # Отправляем как пересылку (текст передаем исходный, если forward не подтягивает его сам)
-            new_msg = await self.send_message(
-                self.config.comments_chat_id, 
-                text=text or " ", 
-                attachments=copy_atts, 
-                link=forward_link
-            )
-            
+            new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
             if new_msg:
                 new_mid = new_msg.get("body", {}).get("mid")
-                # 3. Закрепляем в чате комментариев
+                # Закрепляем в чате комментариев
                 await self.pin_message(self.config.comments_chat_id, new_mid)
-                logger.info(f"Post forwarded (link) to comments chat and pinned: {new_mid}")
+                logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
+
+        # 2. Теперь редактируем пост в канале, добавляя кнопку со ссылкой на пересланный пост
+        # Если пересылка удалась, делаем диплинк на сообщение, иначе на чат
+        if new_mid:
+            comment_url = f"max://chat/{self.config.comments_chat_id}/{new_mid}"
+        else:
+            comment_url = self.config.comments_chat_link
+
+        new_atts = list(atts)
+        if comment_url:
+            new_atts.append({
+                "type": "inline_keyboard",
+                "payload": {"buttons": [[{
+                    "type": "link",
+                    "text": "💬 Комментарии",
+                    "url": comment_url
+                }]]}
+            })
+        
+        await self.edit_message(mid, text, new_atts)
+        logger.info(f"Original post {mid} edited with link to {comment_url}")
 
     async def process_admin_message(self, msg: Dict[str, Any]):
         sender_id = msg.get("sender", {}).get("user_id")
