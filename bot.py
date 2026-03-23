@@ -72,12 +72,44 @@ def is_reply_or_thread(message: dict[str, Any]) -> bool:
     return isinstance(link, dict) and bool(link)
 
 
+def sender_display_name(sender: dict[str, Any]) -> str:
+    fn = sender.get("first_name")
+    ln = sender.get("last_name")
+    if fn and ln:
+        return f"{fn} {ln}".strip()
+    if fn:
+        return str(fn)
+    if ln:
+        return str(ln)
+    return (
+        sender.get("name")
+        or sender.get("username")
+        or str(sender.get("user_id", "?"))
+    )
+
+
+def sender_profile_lines(sender: dict[str, Any]) -> list[str]:
+    """Ссылки на пользователя: веб по username, deep link по user_id (см. документацию MAX)."""
+    lines: list[str] = []
+    uid = sender.get("user_id")
+    uname = sender.get("username")
+    if uname:
+        u = str(uname).lstrip("@")
+        lines.append(f"Профиль: https://max.ru/{u}")
+    if uid is not None:
+        lines.append(f"MAX (приложение): max://user/{uid}")
+    return lines
+
+
 def format_forward_text(message: dict[str, Any]) -> str:
     body = message.get("body") if isinstance(message.get("body"), dict) else {}
     text = (body or {}).get("text") or ""
     sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
-    name = sender.get("name") or sender.get("username") or str(sender.get("user_id", "?"))
-    lines = [f"💬 {name}", text.strip() if text else "(без текста)"]
+    name = sender_display_name(sender)
+    lines = [f"💬 {name}"]
+    lines.extend(sender_profile_lines(sender))
+    lines.append("")
+    lines.append(text.strip() if text else "(без текста)")
     atts = (body or {}).get("attachments")
     if isinstance(atts, list) and atts:
         lines.append(f"[вложений: {len(atts)}]")
