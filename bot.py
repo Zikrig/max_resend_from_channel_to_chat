@@ -32,7 +32,7 @@ class AdminState(Enum):
     AWAITING_AD_LINK = "awaiting_ad_link"
 
 class Config:
-    def __init__(self, filename: str = "config.json"):
+    def __init__(self, filename: str):
         self.filename = filename
         self.ad_text = "Реклама"
         self.ad_url = "https://max.ru"
