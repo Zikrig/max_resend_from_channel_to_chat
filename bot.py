@@ -155,17 +155,17 @@ class MaxBot:
         
         # 2. Проверка на админа (команды ТОЛЬКО в личке)
         if sender_id and sender_id in self.config.admin_ids:
-            # Личка в MAX: либо тип 'user', либо ID получателя совпадает с ID бота
-            is_dm = recipient.get("type") == "user" or (chat_id and self.bot_id and int(chat_id) == int(self.bot_id))
+            # Если это не канал и не чат комментариев — считаем личкой (для надежности)
+            is_not_public = (chat_id != self.config.channel_id) and (chat_id != self.config.comments_chat_id)
             
-            if is_dm:
-                logger.info(f"Admin {sender_id} sent a command in DM. Processing.")
+            if is_not_public:
+                logger.info(f"Admin {sender_id} command detected in chat {chat_id}. Processing.")
                 await self.process_admin_message(msg)
                 return
             else:
-                logger.debug(f"Admin {sender_id} sent a message in group/channel {chat_id}. Ignoring as command.")
+                logger.info(f"Admin {sender_id} sent message in public chat/channel. Ignoring command.")
 
-        logger.info(f"No match. Sender {sender_id} not in admins {self.config.admin_ids} or not DM.")
+        logger.info(f"No match. Sender {sender_id} not in admins {self.config.admin_ids} or message in channel.")
 
     async def process_channel_post(self, msg: Dict[str, Any]):
         mid = msg.get("body", {}).get("mid")
