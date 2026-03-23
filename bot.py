@@ -239,14 +239,14 @@ class MaxBot:
                 logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
 
         # 3. Редактируем оригинал в канале
-        # Пробуем разные варианты ссылки
-        if self.config.comments_chat_link:
-            # Если есть прямая ссылка (инвайт) - она в приоритете
+        # Формируем ссылку на сообщение по вашему образцу: https://max.ru/c/{chat_id}/{msg_id_part}
+        if new_mid:
+            # Вырезаем префикс 'mid.' если он есть
+            msg_id_part = str(new_mid).split(".")[-1]
+            comment_url = f"https://max.ru/c/{self.config.comments_chat_id}/{msg_id_part}"
+        elif self.config.comments_chat_link:
+            # Fallback на инвайт-ссылку
             comment_url = self.config.comments_chat_link
-        elif self.config.comments_chat_id:
-            # Fallback на формат чата (убираем минус если есть)
-            cid_str = str(self.config.comments_chat_id).replace("-", "")
-            comment_url = f"https://max.ru/chat/{cid_str}"
         else:
             comment_url = ""
 
