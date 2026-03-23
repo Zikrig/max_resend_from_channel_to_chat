@@ -239,16 +239,23 @@ class MaxBot:
 
     async def send_admin_menu(self, user_id: int):
         buttons = [
-            [
-                {"type": "callback", "text": "📝 Изменить текст", "payload": "admin_set_text"},
-                {"type": "callback", "text": "🔗 Изменить ссылку", "payload": "admin_set_link"}
-            ],
-            [
-                {"type": "callback", "text": "🔙 Назад", "payload": "admin_close"}
-            ]
+            [{"type": "callback", "text": "🔗 Рекламная ссылка", "payload": "admin_ad_submenu"}],
+            [{"type": "callback", "text": "❌ Закрыть", "payload": "admin_close"}]
+        ]
+        text = "🛠 **Админ-панель**\nВыберите раздел:"
+        await self.send_message(user_id, text, [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }])
+
+    async def send_ad_submenu(self, user_id: int):
+        buttons = [
+            [{"type": "callback", "text": "📝 Изменить текст", "payload": "admin_set_text"}],
+            [{"type": "callback", "text": "🔗 Изменить ссылку", "payload": "admin_set_link"}],
+            [{"type": "callback", "text": "🔙 Назад", "payload": "admin_menu"}]
         ]
         text = (
-            "🛠 **Админ-панель**\n\n"
+            "🔗 **Настройка рекламной ссылки**\n\n"
             f"Текущий текст: `{self.config.ad_text}`\n"
             f"Текущая ссылка: `{self.config.ad_url}`\n\n"
             "Выберите действие:"
@@ -265,7 +272,14 @@ class MaxBot:
         if sender_id not in self.config.admin_ids:
             return
 
-        if payload == "admin_set_text":
+        if payload == "admin_menu":
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_admin_menu(sender_id)
+
+        elif payload == "admin_ad_submenu":
+            await self.send_ad_submenu(sender_id)
+
+        elif payload == "admin_set_text":
             self.admin_states[sender_id] = AdminState.AWAITING_AD_TEXT
             await self.send_message(sender_id, "Введите новый текст для рекламной кнопки:")
             
