@@ -136,24 +136,25 @@ class MaxBot:
         sender_id = sender.get("user_id")
         
         recipient = msg.get("recipient", {})
-        # Проверяем возможные места нахождения chat_id
-        chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id")
+        # Проверяем возможные места нахождения chat_id и приводим к int
+        raw_chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id")
+        chat_id = int(raw_chat_id) if raw_chat_id is not None else None
         chat_type = recipient.get("type") or recipient.get("chat", {}).get("type")
         
-        logger.info(f"New message: mid={msg.get('body', {}).get('mid')}, sender={sender_id}, chat_id={chat_id}, chat_type={chat_type}")
+        logger.info(f"New message: mid={msg.get('body', {}).get('mid')}, sender={sender_id}, chat_id={chat_id} (type={type(chat_id)}), target_channel_id={self.config.channel_id} (type={type(self.config.channel_id)})")
 
         # Игнорируем свои сообщения
-        if sender_id == self.bot_id:
+        if sender_id and self.bot_id and int(sender_id) == int(self.bot_id):
             logger.debug("Ignoring message from self.")
             return
             
-        # Если сообщение из канала
-        if chat_id == self.config.channel_id:
+        # Сравнение с приведением типов
+        if chat_id is not None and int(chat_id) == int(self.config.channel_id):
             logger.info(f"MATCH: Post from channel {chat_id} detected.")
             await self.process_channel_post(msg)
             return
-        else:
-            logger.debug(f"Message chat_id {chat_id} does not match channel_id {self.config.channel_id}")
+        
+        logger.info(f"No match for chat_id {chat_id}. Looking for admin commands...")
 
         # Если сообщение от админа (в личку боту)
         if sender_id in self.config.admin_ids:
