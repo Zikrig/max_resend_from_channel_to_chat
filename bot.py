@@ -94,6 +94,10 @@ class MaxBot:
             payload = {}
             if text is not None:
                 payload["text"] = text
+            elif link is not None:
+                # В некоторых API для forward/reply текст обязателен
+                payload["text"] = " "
+                
             if attachments:
                 payload["attachments"] = attachments
             if link:
@@ -107,6 +111,8 @@ class MaxBot:
                 params["chat_id"] = chat_id
             
             r = await self.client.post("/messages", params=params, json=payload)
+            if r.status_code != 200:
+                logger.error(f"Failed to send message: {r.status_code} {r.text}")
             r.raise_for_status()
             return r.json().get("message")
         except Exception as e:
@@ -241,10 +247,10 @@ class MaxBot:
             # Используем поле link для пересылки
             forward_link = {"mid": mid, "type": "forward"}
             
-            # Отправляем как пересылку (текст=None, чтобы не дублировать тело поста)
+            # Отправляем как пересылку (текст передаем исходный, если forward не подтягивает его сам)
             new_msg = await self.send_message(
                 self.config.comments_chat_id, 
-                text=None, 
+                text=text or " ", 
                 attachments=copy_atts, 
                 link=forward_link
             )
