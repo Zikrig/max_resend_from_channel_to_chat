@@ -1,11 +1,7 @@
-# Скопируйте .env.example в .env и заполните переменные (Compose подхватит .env для подстановки).
 services:
   max-forward-bot:
     build: .
     restart: unless-stopped
-    environment:
-      MAX_BOT_TOKEN: ${MAX_BOT_TOKEN}
-      TARGET_CHAT_ID: ${TARGET_CHAT_ID}
-      SOURCE_CHANNEL_CHAT_IDS: ${SOURCE_CHANNEL_CHAT_IDS}
-      COMMENTS_ONLY: ${COMMENTS_ONLY:-false}
-      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    env_file:
+      - .env
+    # environment здесь больше не нужен, так как env_file подгрузит всё из .env
