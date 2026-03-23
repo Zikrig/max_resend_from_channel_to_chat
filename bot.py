@@ -96,12 +96,12 @@ class MaxBot:
         except Exception as e:
             logger.error(f"Failed to pin message {message_id} in {chat_id}: {e}")
 
-    def get_standard_buttons(self, include_comments: bool = True) -> List[List[Dict]]:
+    def get_standard_buttons(self, include_comments: bool = True, include_ad: bool = True) -> List[List[Dict]]:
         buttons = []
         row = []
         
         # Кнопка рекламы
-        if self.config.ad_text and self.config.ad_url:
+        if include_ad and self.config.ad_text and self.config.ad_url:
             row.append({
                 "type": "link",
                 "text": self.config.ad_text,
@@ -167,28 +167,27 @@ class MaxBot:
         text = msg.get("body", {}).get("text") or ""
         atts = msg.get("body", {}).get("attachments") or []
         
-        # 1. Добавляем кнопки к посту в канале
+        # 1. Добавляем кнопки к посту в канале (только Комментарии, без Рекламы)
         new_atts = list(atts)
-        standard_buttons = self.get_standard_buttons(include_comments=True)
-        if standard_buttons:
+        channel_buttons = self.get_standard_buttons(include_comments=True, include_ad=False)
+        if channel_buttons:
             new_atts.append({
                 "type": "inline_keyboard",
-                "payload": {"buttons": standard_buttons}
+                "payload": {"buttons": channel_buttons}
             })
         
         # Редактируем пост в канале
         await self.edit_message(mid, text, new_atts)
-        logger.info(f"Post {mid} in channel edited with buttons.")
+        logger.info(f"Post {mid} in channel edited with 'Comments' button.")
 
-        # 2. Пересылаем в чат комментариев
+        # 2. Пересылаем в чат комментариев (только Реклама, без кнопки Комментарии)
         if self.config.comments_chat_id:
-            # Формируем вложения для копии (без кнопки комменты, но с рекламой)
             copy_atts = list(atts)
-            ad_only_buttons = self.get_standard_buttons(include_comments=False)
-            if ad_only_buttons:
+            ad_buttons = self.get_standard_buttons(include_comments=False, include_ad=True)
+            if ad_buttons:
                 copy_atts.append({
                     "type": "inline_keyboard",
-                    "payload": {"buttons": ad_only_buttons}
+                    "payload": {"buttons": ad_buttons}
                 })
             
             # Вставляем ссылку на оригинал в начало текста, если нужно, или просто текст
