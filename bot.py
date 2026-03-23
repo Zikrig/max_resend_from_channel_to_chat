@@ -133,34 +133,39 @@ class MaxBot:
 
     async def on_message_created(self, msg: Dict[str, Any]):
         sender = msg.get("sender", {})
-        sender_id = sender.get("user_id")
+        raw_sender_id = sender.get("user_id")
+        sender_id = int(raw_sender_id) if raw_sender_id is not None else None
         
         recipient = msg.get("recipient", {})
-        # Проверяем возможные места нахождения chat_id и приводим к int
-        raw_chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id")
+        # В MAX для лички chat_id может быть равен user_id бота
+        raw_chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id") or recipient.get("user_id")
         chat_id = int(raw_chat_id) if raw_chat_id is not None else None
-        chat_type = recipient.get("type") or recipient.get("chat", {}).get("type")
         
-        logger.info(f"New message: mid={msg.get('body', {}).get('mid')}, sender={sender_id}, chat_id={chat_id} (type={type(chat_id)}), target_channel_id={self.config.channel_id} (type={type(self.config.channel_id)})")
+        logger.info(f"New message: mid={msg.get('body', {}).get('mid')}, sender={sender_id}, chat_id={chat_id}")
 
-        # Игнорируем свои сообщения
+        # Игнорируем сообщения от самого себя (бота)
         if sender_id and self.bot_id and int(sender_id) == int(self.bot_id):
-            logger.debug("Ignoring message from self.")
             return
             
-        # Сравнение с приведением типов
+        # 1. Проверка на канал (пересылка и кнопки)
         if chat_id is not None and int(chat_id) == int(self.config.channel_id):
             logger.info(f"MATCH: Post from channel {chat_id} detected.")
             await self.process_channel_post(msg)
             return
         
-        logger.info(f"No match for chat_id {chat_id}. Looking for admin commands...")
-
-        # Если сообщение от админа (в личку боту)
-        if sender_id in self.config.admin_ids:
-            if not chat_id or chat_type == "user" or chat_id == self.bot_id:
-                logger.info(f"Admin command from {sender_id} detected.")
+        # 2. Проверка на админа (команды ТОЛЬКО в личке)
+        if sender_id and sender_id in self.config.admin_ids:
+            # Личка в MAX: либо тип 'user', либо ID получателя совпадает с ID бота
+            is_dm = recipient.get("type") == "user" or (chat_id and self.bot_id and int(chat_id) == int(self.bot_id))
+            
+            if is_dm:
+                logger.info(f"Admin {sender_id} sent a command in DM. Processing.")
                 await self.process_admin_message(msg)
+                return
+            else:
+                logger.debug(f"Admin {sender_id} sent a message in group/channel {chat_id}. Ignoring as command.")
+
+        logger.info(f"No match. Sender {sender_id} not in admins {self.config.admin_ids} or not DM.")
 
     async def process_channel_post(self, msg: Dict[str, Any]):
         mid = msg.get("body", {}).get("mid")
