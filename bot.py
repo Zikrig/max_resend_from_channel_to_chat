@@ -239,10 +239,9 @@ class MaxBot:
 
     async def send_admin_menu(self, user_id: int):
         buttons = [
-            [{"type": "callback", "text": "🔗 Рекламная ссылка", "payload": "admin_ad_submenu"}],
-            [{"type": "callback", "text": "❌ Закрыть", "payload": "admin_close"}]
+            [{"type": "callback", "text": "🔗 Рекламная ссылка", "payload": "admin_ad_submenu"}]
         ]
-        text = "🛠 **Админ-панель**\nВыберите раздел:"
+        text = "Админ-панель\nВыберите раздел:"
         await self.send_message(user_id, text, [{
             "type": "inline_keyboard",
             "payload": {"buttons": buttons}
@@ -255,9 +254,9 @@ class MaxBot:
             [{"type": "callback", "text": "🔙 Назад", "payload": "admin_menu"}]
         ]
         text = (
-            "🔗 **Настройка рекламной ссылки**\n\n"
-            f"Текущий текст: `{self.config.ad_text}`\n"
-            f"Текущая ссылка: `{self.config.ad_url}`\n\n"
+            "Настройка рекламной ссылки\n\n"
+            f"Текущий текст: {self.config.ad_text}\n"
+            f"Текущая ссылка: {self.config.ad_url}\n\n"
             "Выберите действие:"
         )
         await self.send_message(user_id, text, [{
@@ -267,9 +266,14 @@ class MaxBot:
 
     async def on_callback(self, update: Dict[str, Any]):
         payload = update.get("payload")
-        sender_id = update.get("sender", {}).get("user_id")
+        # В колбэках данные отправителя обычно внутри message
+        sender = update.get("sender") or update.get("message", {}).get("sender", {})
+        sender_id = int(sender.get("user_id")) if sender.get("user_id") else None
         
-        if sender_id not in self.config.admin_ids:
+        logger.info(f"Callback received: payload={payload}, sender={sender_id}")
+
+        if not sender_id or sender_id not in self.config.admin_ids:
+            logger.warning(f"Unauthorized callback from {sender_id}")
             return
 
         if payload == "admin_menu":
@@ -286,10 +290,6 @@ class MaxBot:
         elif payload == "admin_set_link":
             self.admin_states[sender_id] = AdminState.AWAITING_AD_LINK
             await self.send_message(sender_id, "Введите новую URL-ссылку для рекламы (с http/https):")
-            
-        elif payload == "admin_close":
-            self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, "Админ-панель закрыта. Для вызова используйте /admin")
 
     async def run(self):
         await self.get_me()
