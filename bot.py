@@ -12,6 +12,8 @@ import json
 import logging
 import os
 import sys
+import base64
+import struct
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
@@ -30,6 +32,21 @@ class AdminState(Enum):
     NONE = "none"
     AWAITING_AD_TEXT = "awaiting_ad_text"
     AWAITING_AD_LINK = "awaiting_ad_link"
+
+def get_short_id(seq: Any) -> str:
+    """Вычисляет короткий ID сообщения (как AZ0a_VPec8o) из поля seq."""
+    try:
+        if not seq:
+            return ""
+        # Кодируем 8-байтовое число (Big Endian) в Base64 и убираем лишнее
+        b = struct.pack(">Q", int(seq))
+        # Используем стандартный Base64, заменяя + на - и / на _ (urlsafe)
+        # Убираем паддинг '=' и лидирующие нули (если они есть в байтах)
+        short = base64.urlsafe_b64encode(b).decode().rstrip("=")
+        # Обычно в MAX короткий ID это именно такая перепаковка seq
+        return short
+    except Exception:
+        return ""
 
 class Config:
     def __init__(self, filename: str = "config.json"):
@@ -227,15 +244,20 @@ class MaxBot:
             
             new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
             if new_msg:
-                # Логируем все поля, чтобы найти короткий ID (AZ0a_VPec8o)
-                logger.info(f"Forwarded message fields: {list(new_msg.keys())}")
+                # Логируем полный JSON для анализа полей
+                logger.info(f"Forwarded message JSON: {json.dumps(new_msg, ensure_ascii=False)}")
+                
                 body = new_msg.get("body", {})
-                logger.info(f"Forwarded body fields: {list(body.keys())}")
+                seq = body.get("seq")
+                mid_full = body.get("mid")
                 
-                # Пробуем найти короткий ID. В MAX он часто в поле 'id' или 'message_id'
-                new_mid = new_msg.get("id") or body.get("id") or body.get("mid")
+                # Пробуем вычислить короткий ID из seq
+                short_id = get_short_id(seq)
                 
-                logger.info(f"Post forwarded to comments chat. Selected ID: {new_mid}")
+                # Приоритет: вычисленный short_id, если не вышло - часть mid
+                new_mid = short_id or str(mid_full).split(".")[-1]
+                
+                logger.info(f"Post forwarded to comments chat. seq={seq}, Selected ID: {new_mid}")
 
         # 3. Редактируем оригинал в канале
         # Формируем ссылку на сообщение по вашему образцу: https://max.ru/c/{chat_id}/{msg_id_part}
