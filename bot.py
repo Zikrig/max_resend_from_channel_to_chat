@@ -32,8 +32,9 @@ class AdminState(Enum):
     AWAITING_AD_LINK = "awaiting_ad_link"
 
 class Config:
-    def __init__(self):
-        # Читаем из окружения, задаем дефолты
+    def __init__(self, filename: str = "config.json"):
+        self.filename = filename
+        # Дефолты из окружения
         self.ad_text = os.environ.get("AD_TEXT", "Реклама")
         self.ad_url = os.environ.get("AD_URL", "https://max.ru")
         self.channel_id = int(os.environ.get("CHANNEL_CHAT_ID", "0"))
@@ -42,6 +43,31 @@ class Config:
         
         raw_admins = os.environ.get("ADMIN_USER_IDS", "")
         self.admin_ids = [int(x.strip()) for x in raw_admins.split(",") if x.strip()]
+        
+        # Загружаем сохраненные настройки, если есть
+        self.load()
+
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.ad_text = data.get("ad_text", self.ad_text)
+                    self.ad_url = data.get("ad_url", self.ad_url)
+                    logger.info("Config loaded from file.")
+            except Exception as e:
+                logger.error(f"Failed to load config file: {e}")
+
+    def save(self):
+        try:
+            with open(self.filename, "w", encoding="utf-8") as f:
+                json.dump({
+                    "ad_text": self.ad_text,
+                    "ad_url": self.ad_url
+                }, f, ensure_ascii=False, indent=2)
+                logger.info("Config saved to file.")
+        except Exception as e:
+            logger.error(f"Failed to save config file: {e}")
 
 class MaxBot:
     def __init__(self, token: str, config: Config):
@@ -224,18 +250,20 @@ class MaxBot:
 
         if state == AdminState.AWAITING_AD_TEXT:
             self.config.ad_text = text
+            self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"✅ Текст рекламы изменен на: {text} (до перезапуска)")
-            await self.send_admin_menu(sender_id)
+            await self.send_message(sender_id, f"✅ Текст рекламы изменен на: {text}")
+            await self.send_ad_submenu(sender_id)
             
         elif state == AdminState.AWAITING_AD_LINK:
             if not (text.startswith("http://") or text.startswith("https://")):
                 await self.send_message(sender_id, "❌ Ошибка: Ссылка должна начинаться с http:// или https://. Попробуйте еще раз:")
                 return
             self.config.ad_url = text
+            self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"✅ Ссылка рекламы изменена на: {text} (до перезапуска)")
-            await self.send_admin_menu(sender_id)
+            await self.send_message(sender_id, f"✅ Ссылка рекламы изменена на: {text}")
+            await self.send_ad_submenu(sender_id)
 
     async def send_admin_menu(self, user_id: int):
         buttons = [

@@ -4,4 +4,5 @@ services:
     restart: unless-stopped
     env_file:
       - .env
-    # environment здесь больше не нужен, так как env_file подгрузит всё из .env
+    volumes:
+      - .:/app  # Это сохраняет config.json даже после удаления контейнера
