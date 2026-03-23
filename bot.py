@@ -69,11 +69,18 @@ class MaxBot:
             if attachments:
                 payload["attachments"] = attachments
             
-            r = await self.client.post("/messages", params={"chat_id": chat_id}, json=payload)
+            # В MAX для лички используется user_id, для групп/каналов - chat_id
+            params = {}
+            if chat_id > 0:
+                params["user_id"] = chat_id
+            else:
+                params["chat_id"] = chat_id
+            
+            r = await self.client.post("/messages", params=params, json=payload)
             r.raise_for_status()
             return r.json().get("message")
         except Exception as e:
-            logger.error(f"Failed to send message to {chat_id}: {e}")
+            logger.error(f"Failed to send message to {chat_id} (params={params}): {e}")
             return None
 
     async def edit_message(self, message_id: str, text: str, attachments: Optional[List[Dict]] = None) -> bool:
