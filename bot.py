@@ -46,6 +46,7 @@ class Config:
         
         # Загружаем сохраненные настройки, если есть
         self.load()
+        logger.info(f"Config initialized: channel={self.channel_id}, comments_chat={self.comments_chat_id}, link_len={len(self.comments_chat_link)}")
 
     def load(self):
         if os.path.exists(self.filename):
@@ -238,10 +239,18 @@ class MaxBot:
                 logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
 
         # 3. Редактируем оригинал в канале
-        # Используем инвайт-ссылку на чат из конфига (COMMENTS_CHAT_LINK).
-        # API MAX требует только http/https в кнопках (max:// нельзя),
-        # а прямые ссылки на сообщения в группах часто выдают "информация недоступна".
-        comment_url = self.config.comments_chat_link
+        # Пробуем разные варианты ссылки
+        if self.config.comments_chat_link:
+            # Если есть прямая ссылка (инвайт) - она в приоритете
+            comment_url = self.config.comments_chat_link
+        elif self.config.comments_chat_id:
+            # Fallback на формат чата (убираем минус если есть)
+            cid_str = str(self.config.comments_chat_id).replace("-", "")
+            comment_url = f"https://max.ru/chat/{cid_str}"
+        else:
+            comment_url = ""
+
+        logger.info(f"Final comment_url for button: {comment_url}")
 
         channel_atts = list(clean_atts)
         if comment_url:
