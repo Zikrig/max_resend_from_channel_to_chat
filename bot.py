@@ -75,7 +75,7 @@ class MaxBot:
         self.token = token
         self.config = config
         self.headers = {"Authorization": self.token}
-        self.client = httpx.AsyncClient(base_url=API_BASE, headers=self.headers, timeout=30.0)
+        self.client = httpx.AsyncClient(base_url=API_BASE, headers=self.headers, timeout=60.0)
         self.bot_id = None
         self.admin_states: Dict[int, AdminState] = {}
 
@@ -308,7 +308,7 @@ class MaxBot:
                 if new_marker is not None:
                     marker = new_marker
             except httpx.HTTPError as e:
-                logger.error(f"Polling HTTP error: {e}")
+                logger.error(f"Polling HTTP error ({type(e).__name__}): {e}")
                 await asyncio.sleep(5)
             except Exception as e:
                 logger.error(f"Polling error: {e}")
