@@ -266,24 +266,22 @@ class MaxBot:
 
     async def on_callback(self, update: Dict[str, Any]):
         # Логируем весь update для отладки структуры
-        logger.info(f"Callback raw update: {json.dumps(update, ensure_ascii=False)}")
+        logger.debug(f"Callback raw update: {json.dumps(update, ensure_ascii=False)}")
         
-        payload = update.get("payload")
-        # Пробуем найти в разных местах
-        if not payload:
-            payload = update.get("callback", {}).get("payload")
-            
-        sender = update.get("sender") or update.get("message", {}).get("sender", {})
-        sender_id = int(sender.get("user_id")) if sender.get("user_id") else None
+        callback_data = update.get("callback", {})
+        payload = callback_data.get("payload")
         
-        logger.info(f"Callback parsed: payload={payload}, sender={sender_id}")
+        # ID того, кто НАЖАЛ кнопку
+        user_data = callback_data.get("user", {})
+        sender_id = int(user_data.get("user_id")) if user_data.get("user_id") else None
+        
+        logger.info(f"Callback parsed: payload={payload}, user_id={sender_id}")
 
         if not sender_id or sender_id not in self.config.admin_ids:
             logger.warning(f"Unauthorized callback from {sender_id}. Admins are: {self.config.admin_ids}")
             return
 
         if payload == "admin_menu":
-            self.admin_states[sender_id] = AdminState.NONE
             await self.send_admin_menu(sender_id)
 
         elif payload == "admin_ad_submenu":
