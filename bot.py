@@ -32,43 +32,16 @@ class AdminState(Enum):
     AWAITING_AD_LINK = "awaiting_ad_link"
 
 class Config:
-    def __init__(self, filename: str):
-        self.filename = filename
-        self.ad_text = "Реклама"
-        self.ad_url = "https://max.ru"
-        self.channel_id = 0
-        self.comments_chat_id = 0
-        self.comments_chat_link = ""
-        self.admin_ids = []
-        self.load()
-
-    def load(self):
-        if os.path.exists(self.filename):
-            try:
-                with open(self.filename, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    self.ad_text = data.get("ad_text", self.ad_text)
-                    self.ad_url = data.get("ad_url", self.ad_url)
-                    self.channel_id = int(data.get("channel_id", 0))
-                    self.comments_chat_id = int(data.get("comments_chat_id", 0))
-                    self.comments_chat_link = data.get("comments_chat_link", "")
-                    self.admin_ids = data.get("admin_ids", [])
-            except Exception as e:
-                logger.error(f"Failed to load config: {e}")
-
-    def save(self):
-        try:
-            with open(self.filename, "w", encoding="utf-8") as f:
-                json.dump({
-                    "ad_text": self.ad_text,
-                    "ad_url": self.ad_url,
-                    "channel_id": self.channel_id,
-                    "comments_chat_id": self.comments_chat_id,
-                    "comments_chat_link": self.comments_chat_link,
-                    "admin_ids": self.admin_ids
-                }, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Failed to save config: {e}")
+    def __init__(self):
+        # Читаем из окружения, задаем дефолты
+        self.ad_text = os.environ.get("AD_TEXT", "Реклама")
+        self.ad_url = os.environ.get("AD_URL", "https://max.ru")
+        self.channel_id = int(os.environ.get("CHANNEL_CHAT_ID", "0"))
+        self.comments_chat_id = int(os.environ.get("COMMENTS_CHAT_ID", "0"))
+        self.comments_chat_link = os.environ.get("COMMENTS_CHAT_LINK", "")
+        
+        raw_admins = os.environ.get("ADMIN_USER_IDS", "")
+        self.admin_ids = [int(x.strip()) for x in raw_admins.split(",") if x.strip()]
 
 class MaxBot:
     def __init__(self, token: str, config: Config):
@@ -239,9 +212,8 @@ class MaxBot:
 
         if state == AdminState.AWAITING_AD_TEXT:
             self.config.ad_text = text
-            self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"✅ Текст рекламы изменен на: {text}")
+            await self.send_message(sender_id, f"✅ Текст рекламы изменен на: {text} (до перезапуска)")
             await self.send_admin_menu(sender_id)
             
         elif state == AdminState.AWAITING_AD_LINK:
@@ -249,9 +221,8 @@ class MaxBot:
                 await self.send_message(sender_id, "❌ Ошибка: Ссылка должна начинаться с http:// или https://. Попробуйте еще раз:")
                 return
             self.config.ad_url = text
-            self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"✅ Ссылка рекламы изменена на: {text}")
+            await self.send_message(sender_id, f"✅ Ссылка рекламы изменена на: {text} (до перезапуска)")
             await self.send_admin_menu(sender_id)
 
     async def send_admin_menu(self, user_id: int):
@@ -332,26 +303,6 @@ async def main():
         return
 
     config = Config()
-    
-    # Приоритет переменным из окружения, если в файле пусто
-    env_channel = os.environ.get("CHANNEL_CHAT_ID", "0")
-    if not config.channel_id and env_channel != "0":
-        config.channel_id = int(env_channel)
-        
-    env_comments_id = os.environ.get("COMMENTS_CHAT_ID", "0")
-    if not config.comments_chat_id and env_comments_id != "0":
-        config.comments_chat_id = int(env_comments_id)
-        
-    env_comments_link = os.environ.get("COMMENTS_CHAT_LINK", "")
-    if not config.comments_chat_link and env_comments_link:
-        config.comments_chat_link = env_comments_link
-        
-    env_admins = os.environ.get("ADMIN_USER_IDS", "")
-    if not config.admin_ids and env_admins:
-        config.admin_ids = [int(x.strip()) for x in env_admins.split(",") if x.strip()]
-    
-    config.save()
-
     bot = MaxBot(token, config)
     try:
         await bot.run()
