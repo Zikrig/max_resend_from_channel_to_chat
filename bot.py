@@ -265,15 +265,21 @@ class MaxBot:
         }])
 
     async def on_callback(self, update: Dict[str, Any]):
+        # Логируем весь update для отладки структуры
+        logger.info(f"Callback raw update: {json.dumps(update, ensure_ascii=False)}")
+        
         payload = update.get("payload")
-        # В колбэках данные отправителя обычно внутри message
+        # Пробуем найти в разных местах
+        if not payload:
+            payload = update.get("callback", {}).get("payload")
+            
         sender = update.get("sender") or update.get("message", {}).get("sender", {})
         sender_id = int(sender.get("user_id")) if sender.get("user_id") else None
         
-        logger.info(f"Callback received: payload={payload}, sender={sender_id}")
+        logger.info(f"Callback parsed: payload={payload}, sender={sender_id}")
 
         if not sender_id or sender_id not in self.config.admin_ids:
-            logger.warning(f"Unauthorized callback from {sender_id}")
+            logger.warning(f"Unauthorized callback from {sender_id}. Admins are: {self.config.admin_ids}")
             return
 
         if payload == "admin_menu":
