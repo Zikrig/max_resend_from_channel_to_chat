@@ -149,32 +149,43 @@ class MaxBot:
 
     async def handle_update(self, update: Dict[str, Any]):
         u_type = update.get("update_type")
+        logger.debug(f"Received update type: {u_type}")
         
         if u_type == "message_created":
             await self.on_message_created(update.get("message", {}))
         elif u_type == "message_callback":
             await self.on_callback(update)
+        else:
+            logger.info(f"Skipping update type: {u_type}")
 
     async def on_message_created(self, msg: Dict[str, Any]):
         sender = msg.get("sender", {})
         sender_id = sender.get("user_id")
         
+        recipient = msg.get("recipient", {})
+        # Проверяем возможные места нахождения chat_id
+        chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id")
+        chat_type = recipient.get("type") or recipient.get("chat", {}).get("type")
+        
+        logger.info(f"New message: mid={msg.get('body', {}).get('mid')}, sender={sender_id}, chat_id={chat_id}, chat_type={chat_type}")
+
         # Игнорируем свои сообщения
         if sender_id == self.bot_id:
+            logger.debug("Ignoring message from self.")
             return
             
-        recipient = msg.get("recipient", {})
-        chat_id = recipient.get("chat_id")
-        
         # Если сообщение из канала
         if chat_id == self.config.channel_id:
+            logger.info(f"MATCH: Post from channel {chat_id} detected.")
             await self.process_channel_post(msg)
             return
+        else:
+            logger.debug(f"Message chat_id {chat_id} does not match channel_id {self.config.channel_id}")
 
         # Если сообщение от админа (в личку боту)
         if sender_id in self.config.admin_ids:
-            # Если это чат 1 на 1 (нет chat_id или это диалог)
-            if not chat_id or recipient.get("type") == "user" or chat_id == self.bot_id:
+            if not chat_id or chat_type == "user" or chat_id == self.bot_id:
+                logger.info(f"Admin command from {sender_id} detected.")
                 await self.process_admin_message(msg)
 
     async def process_channel_post(self, msg: Dict[str, Any]):
