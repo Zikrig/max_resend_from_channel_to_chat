@@ -238,9 +238,10 @@ class MaxBot:
                 logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
 
         # 3. Редактируем оригинал в канале
-        # Используем диплинк max://chat/{id} для открытия чата в приложении.
-        # Так как мы закрепили пост (pin), пользователь сразу увидит его в топе.
-        comment_url = f"max://chat/{self.config.comments_chat_id}"
+        # Используем инвайт-ссылку на чат из конфига (COMMENTS_CHAT_LINK).
+        # API MAX требует только http/https в кнопках (max:// нельзя),
+        # а прямые ссылки на сообщения в группах часто выдают "информация недоступна".
+        comment_url = self.config.comments_chat_link
 
         channel_atts = list(clean_atts)
         if comment_url:
