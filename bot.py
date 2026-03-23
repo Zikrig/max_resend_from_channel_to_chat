@@ -125,13 +125,6 @@ class MaxBot:
             logger.error(f"Failed to edit message {message_id}: {e}")
             return False
 
-    async def pin_message(self, chat_id: int, message_id: str):
-        try:
-            r = await self.client.put(f"/chats/{chat_id}/pin", json={"message_id": message_id, "notify": True})
-            r.raise_for_status()
-        except Exception as e:
-            logger.error(f"Failed to pin message {message_id} in {chat_id}: {e}")
-
     def get_standard_buttons(self, include_comments: bool = True, include_ad: bool = True) -> List[List[Dict]]:
         buttons = []
         row = []
@@ -235,8 +228,7 @@ class MaxBot:
             new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
             if new_msg:
                 new_mid = new_msg.get("body", {}).get("mid")
-                await self.pin_message(self.config.comments_chat_id, new_mid)
-                logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
+                logger.info(f"Post forwarded to comments chat: {new_mid}")
 
         # 3. Редактируем оригинал в канале
         # Формируем ссылку на сообщение по вашему образцу: https://max.ru/c/{chat_id}/{msg_id_part}
