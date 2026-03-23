@@ -1,262 +1,354 @@
 """
-MAX-бот: long polling по /updates, пересылка сообщений из чата комментариев канала в целевой чат.
-Требуется: бот — администратор канала (см. документацию MAX).
+MAX-бот: 
+1. Добавляет кнопки (Комментарии, Реклама) к постам в канале.
+2. Пересылает пост в чат комментариев и закрепляет его там.
+3. Управление рекламной ссылкой через /admin.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import sys
-from typing import Any
+from enum import Enum
+from typing import Any, Dict, List, Optional
 
 import httpx
 
+# Настройки логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+)
+logger = logging.getLogger("MaxBot")
+
 API_BASE = "https://platform-api.max.ru"
-LOG_LEVEL = os.environ.get("LOG_LEVEL", "INFO").upper()
 
+class AdminState(Enum):
+    NONE = "none"
+    AWAITING_AD_TEXT = "awaiting_ad_text"
+    AWAITING_AD_LINK = "awaiting_ad_link"
 
-def _parse_int_set(raw: str | None) -> set[int]:
-    if not raw or not raw.strip():
-        return set()
-    out: set[int] = set()
-    for part in raw.replace(";", ",").split(","):
-        part = part.strip()
-        if not part:
-            continue
-        out.add(int(part))
-    return out
+class Config:
+    def __init__(self, filename: str = "config.json"):
+        self.filename = filename
+        self.ad_text = "Реклама"
+        self.ad_url = "https://max.ru"
+        self.channel_id = 0
+        self.comments_chat_id = 0
+        self.comments_chat_link = ""
+        self.admin_ids = []
+        self.load()
 
+    def load(self):
+        if os.path.exists(self.filename):
+            try:
+                with open(self.filename, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    self.ad_text = data.get("ad_text", self.ad_text)
+                    self.ad_url = data.get("ad_url", self.ad_url)
+                    self.channel_id = int(data.get("channel_id", 0))
+                    self.comments_chat_id = int(data.get("comments_chat_id", 0))
+                    self.comments_chat_link = data.get("comments_chat_link", "")
+                    self.admin_ids = data.get("admin_ids", [])
+            except Exception as e:
+                logger.error(f"Failed to load config: {e}")
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    v = os.environ.get(name)
-    if v is None:
-        return default
-    return v.strip().lower() in ("1", "true", "yes", "on")
-
-
-def recipient_chat_id(message: dict[str, Any]) -> int | None:
-    r = message.get("recipient")
-    if not isinstance(r, dict):
-        return None
-    if "chat_id" in r:
+    def save(self):
         try:
-            return int(r["chat_id"])
-        except (TypeError, ValueError):
-            return None
-    chat = r.get("chat")
-    if isinstance(chat, dict) and "chat_id" in chat:
-        try:
-            return int(chat["chat_id"])
-        except (TypeError, ValueError):
-            return None
-    return None
-
-
-def sender_user_id(message: dict[str, Any]) -> int | None:
-    s = message.get("sender")
-    if not isinstance(s, dict):
-        return None
-    uid = s.get("user_id")
-    if uid is None:
-        return None
-    try:
-        return int(uid)
-    except (TypeError, ValueError):
-        return None
-
-
-def is_reply_or_thread(message: dict[str, Any]) -> bool:
-    link = message.get("link")
-    return isinstance(link, dict) and bool(link)
-
-
-def sender_display_name(sender: dict[str, Any]) -> str:
-    fn = sender.get("first_name")
-    ln = sender.get("last_name")
-    if fn and ln:
-        return f"{fn} {ln}".strip()
-    if fn:
-        return str(fn)
-    if ln:
-        return str(ln)
-    return (
-        sender.get("name")
-        or sender.get("username")
-        or str(sender.get("user_id", "?"))
-    )
-
-
-def sender_profile_lines(sender: dict[str, Any]) -> list[str]:
-    """Ссылки на пользователя: веб по username, deep link по user_id (см. документацию MAX)."""
-    lines: list[str] = []
-    uid = sender.get("user_id")
-    uname = sender.get("username")
-    if uname:
-        u = str(uname).lstrip("@")
-        lines.append(f"Профиль: https://max.ru/{u}")
-    if uid is not None:
-        lines.append(f"MAX (приложение): max://user/{uid}")
-    return lines
-
-
-def format_forward_text(message: dict[str, Any]) -> str:
-    body = message.get("body") if isinstance(message.get("body"), dict) else {}
-    text = (body or {}).get("text") or ""
-    sender = message.get("sender") if isinstance(message.get("sender"), dict) else {}
-    name = sender_display_name(sender)
-    lines = [f"💬 {name}"]
-    lines.extend(sender_profile_lines(sender))
-    lines.append("")
-    lines.append(text.strip() if text else "(без текста)")
-    atts = (body or {}).get("attachments")
-    if isinstance(atts, list) and atts:
-        lines.append(f"[вложений: {len(atts)}]")
-    return "\n".join(lines).strip()
-
+            with open(self.filename, "w", encoding="utf-8") as f:
+                json.dump({
+                    "ad_text": self.ad_text,
+                    "ad_url": self.ad_url,
+                    "channel_id": self.channel_id,
+                    "comments_chat_id": self.comments_chat_id,
+                    "comments_chat_link": self.comments_chat_link,
+                    "admin_ids": self.admin_ids
+                }, f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"Failed to save config: {e}")
 
 class MaxBot:
-    def __init__(self) -> None:
-        token = os.environ.get("MAX_BOT_TOKEN", "").strip()
-        if not token:
-            print("MAX_BOT_TOKEN is required", file=sys.stderr)
-            sys.exit(1)
-        self._token = token
-        self._headers = {"Authorization": self._token}
-        target = os.environ.get("TARGET_CHAT_ID", "").strip()
-        if not target:
-            print("TARGET_CHAT_ID is required", file=sys.stderr)
-            sys.exit(1)
-        self._target_chat_id = int(target)
-        self._source_chats = _parse_int_set(os.environ.get("SOURCE_CHANNEL_CHAT_IDS"))
-        if not self._source_chats:
-            print(
-                "SOURCE_CHANNEL_CHAT_IDS is required (comma-separated chat ids of channel comments)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
-        self._comments_only = _env_bool("COMMENTS_ONLY", False)
-        self._bot_user_id: int | None = None
-        timeout = httpx.Timeout(120.0, connect=30.0)
-        self._client = httpx.AsyncClient(
-            base_url=API_BASE,
-            headers=self._headers,
-            timeout=timeout,
-        )
+    def __init__(self, token: str, config: Config):
+        self.token = token
+        self.config = config
+        self.headers = {"Authorization": self.token}
+        self.client = httpx.AsyncClient(base_url=API_BASE, headers=self.headers, timeout=30.0)
+        self.bot_id = None
+        self.admin_states: Dict[int, AdminState] = {}
 
-    async def close(self) -> None:
-        await self._client.aclose()
-
-    async def fetch_me(self) -> None:
-        r = await self._client.get("/me")
-        r.raise_for_status()
-        data = r.json()
-        uid = data.get("user_id")
-        if uid is not None:
-            self._bot_user_id = int(uid)
-        logging.info("Bot user_id=%s name=%s", self._bot_user_id, data.get("first_name"))
-
-    async def send_to_target(self, text: str) -> None:
-        r = await self._client.post(
-            "/messages",
-            params={"chat_id": self._target_chat_id},
-            json={"text": text},
-        )
-        if r.status_code == 429:
-            await asyncio.sleep(2.0)
-            r = await self._client.post(
-                "/messages",
-                params={"chat_id": self._target_chat_id},
-                json={"text": text},
-            )
-        r.raise_for_status()
-
-    def _should_forward(self, message: dict[str, Any]) -> bool:
-        if self._bot_user_id is not None:
-            su = sender_user_id(message)
-            if su is not None and su == self._bot_user_id:
-                return False
-        cid = recipient_chat_id(message)
-        if cid is None or cid not in self._source_chats:
-            return False
-        if self._comments_only and not is_reply_or_thread(message):
-            return False
-        return True
-
-    async def handle_message_created(self, message: dict[str, Any]) -> None:
-        if not self._should_forward(message):
-            return
-        text = format_forward_text(message)
-        if not text:
-            return
+    async def get_me(self):
         try:
-            await self.send_to_target(text)
-            logging.info(
-                "Forwarded message from chat_id=%s sender=%s",
-                recipient_chat_id(message),
-                sender_user_id(message),
-            )
-        except httpx.HTTPStatusError as e:
-            logging.error("Send failed: %s %s", e.response.status_code, e.response.text[:500])
-
-    async def process_update(self, update: dict[str, Any]) -> None:
-        ut = update.get("update_type")
-        if ut != "message_created":
-            return
-        msg = update.get("message")
-        if not isinstance(msg, dict):
-            return
-        await self.handle_message_created(msg)
-
-    async def poll_loop(self) -> None:
-        marker: int | None = None
-        while True:
-            params: dict[str, Any] = {
-                "limit": 100,
-                "timeout": 30,
-                "types": "message_created",
-            }
-            if marker is not None:
-                params["marker"] = marker
-            try:
-                r = await self._client.get("/updates", params=params)
-                r.raise_for_status()
-            except httpx.HTTPError as e:
-                logging.warning("GET /updates failed: %s", e)
-                await asyncio.sleep(5.0)
-                continue
-
+            r = await self.client.get("/me")
+            r.raise_for_status()
             data = r.json()
-            updates = data.get("updates") or []
-            if not isinstance(updates, list):
-                updates = []
-            next_marker = data.get("marker")
-            if isinstance(next_marker, int):
-                marker = next_marker
-            elif next_marker is not None:
-                try:
-                    marker = int(next_marker)
-                except (TypeError, ValueError):
-                    pass
+            self.bot_id = data.get("user_id")
+            logger.info(f"Logged in as bot ID {self.bot_id} (@{data.get('username')})")
+        except Exception as e:
+            logger.critical(f"Failed to get bot info: {e}")
+            sys.exit(1)
 
-            for u in updates:
-                if isinstance(u, dict):
-                    await self.process_update(u)
+    async def send_message(self, chat_id: int, text: str, attachments: Optional[List[Dict]] = None) -> Optional[Dict]:
+        try:
+            payload = {"text": text}
+            if attachments:
+                payload["attachments"] = attachments
+            
+            r = await self.client.post("/messages", params={"chat_id": chat_id}, json=payload)
+            r.raise_for_status()
+            return r.json().get("message")
+        except Exception as e:
+            logger.error(f"Failed to send message to {chat_id}: {e}")
+            return None
 
+    async def edit_message(self, message_id: str, text: str, attachments: Optional[List[Dict]] = None) -> bool:
+        try:
+            payload = {"text": text}
+            if attachments is not None:
+                payload["attachments"] = attachments
+            
+            r = await self.client.put("/messages", params={"message_id": message_id}, json=payload)
+            r.raise_for_status()
+            return True
+        except Exception as e:
+            logger.error(f"Failed to edit message {message_id}: {e}")
+            return False
 
-async def main() -> None:
-    logging.basicConfig(
-        level=getattr(logging, LOG_LEVEL, logging.INFO),
-        format="%(asctime)s %(levelname)s %(message)s",
-    )
-    bot = MaxBot()
+    async def pin_message(self, chat_id: int, message_id: str):
+        try:
+            r = await self.client.put(f"/chats/{chat_id}/pin", json={"message_id": message_id, "notify": True})
+            r.raise_for_status()
+        except Exception as e:
+            logger.error(f"Failed to pin message {message_id} in {chat_id}: {e}")
+
+    def get_standard_buttons(self, include_comments: bool = True) -> List[List[Dict]]:
+        buttons = []
+        row = []
+        
+        # Кнопка рекламы
+        if self.config.ad_text and self.config.ad_url:
+            row.append({
+                "type": "link",
+                "text": self.config.ad_text,
+                "url": self.config.ad_url
+            })
+            
+        # Кнопка комментариев
+        if include_comments and self.config.comments_chat_link:
+            row.append({
+                "type": "link",
+                "text": "💬 Комментарии",
+                "url": self.config.comments_chat_link
+            })
+            
+        if row:
+            buttons.append(row)
+        return buttons
+
+    async def handle_update(self, update: Dict[str, Any]):
+        u_type = update.get("update_type")
+        
+        if u_type == "message_created":
+            await self.on_message_created(update.get("message", {}))
+        elif u_type == "message_callback":
+            await self.on_callback(update)
+
+    async def on_message_created(self, msg: Dict[str, Any]):
+        sender = msg.get("sender", {})
+        sender_id = sender.get("user_id")
+        
+        # Игнорируем свои сообщения
+        if sender_id == self.bot_id:
+            return
+            
+        recipient = msg.get("recipient", {})
+        chat_id = recipient.get("chat_id")
+        
+        # Если сообщение из канала
+        if chat_id == self.config.channel_id:
+            await self.process_channel_post(msg)
+            return
+
+        # Если сообщение от админа (в личку боту)
+        if sender_id in self.config.admin_ids:
+            # Если это чат 1 на 1 (нет chat_id или это диалог)
+            if not chat_id or recipient.get("type") == "user" or chat_id == self.bot_id:
+                await self.process_admin_message(msg)
+
+    async def process_channel_post(self, msg: Dict[str, Any]):
+        mid = msg.get("body", {}).get("mid")
+        text = msg.get("body", {}).get("text") or ""
+        atts = msg.get("body", {}).get("attachments") or []
+        
+        # 1. Добавляем кнопки к посту в канале
+        new_atts = list(atts)
+        standard_buttons = self.get_standard_buttons(include_comments=True)
+        if standard_buttons:
+            new_atts.append({
+                "type": "inline_keyboard",
+                "payload": {"buttons": standard_buttons}
+            })
+        
+        # Редактируем пост в канале
+        await self.edit_message(mid, text, new_atts)
+        logger.info(f"Post {mid} in channel edited with buttons.")
+
+        # 2. Пересылаем в чат комментариев
+        if self.config.comments_chat_id:
+            # Формируем вложения для копии (без кнопки комменты, но с рекламой)
+            copy_atts = list(atts)
+            ad_only_buttons = self.get_standard_buttons(include_comments=False)
+            if ad_only_buttons:
+                copy_atts.append({
+                    "type": "inline_keyboard",
+                    "payload": {"buttons": ad_only_buttons}
+                })
+            
+            # Вставляем ссылку на оригинал в начало текста, если нужно, или просто текст
+            # Для "пересылки" в MAX обычно просто создаем новое сообщение
+            new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
+            
+            if new_msg:
+                new_mid = new_msg.get("body", {}).get("mid")
+                # 3. Закрепляем в чате комментариев
+                await self.pin_message(self.config.comments_chat_id, new_mid)
+                logger.info(f"Post forwarded to comments chat and pinned: {new_mid}")
+
+    async def process_admin_message(self, msg: Dict[str, Any]):
+        sender_id = msg.get("sender", {}).get("user_id")
+        text = (msg.get("body", {}).get("text") or "").strip()
+        state = self.admin_states.get(sender_id, AdminState.NONE)
+
+        if text.lower() == "/admin":
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_admin_menu(sender_id)
+            return
+
+        if state == AdminState.AWAITING_AD_TEXT:
+            self.config.ad_text = text
+            self.config.save()
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, f"✅ Текст рекламы изменен на: {text}")
+            await self.send_admin_menu(sender_id)
+            
+        elif state == AdminState.AWAITING_AD_LINK:
+            if not (text.startswith("http://") or text.startswith("https://")):
+                await self.send_message(sender_id, "❌ Ошибка: Ссылка должна начинаться с http:// или https://. Попробуйте еще раз:")
+                return
+            self.config.ad_url = text
+            self.config.save()
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, f"✅ Ссылка рекламы изменена на: {text}")
+            await self.send_admin_menu(sender_id)
+
+    async def send_admin_menu(self, user_id: int):
+        buttons = [
+            [
+                {"type": "callback", "text": "📝 Изменить текст", "payload": "admin_set_text"},
+                {"type": "callback", "text": "🔗 Изменить ссылку", "payload": "admin_set_link"}
+            ],
+            [
+                {"type": "callback", "text": "🔙 Назад", "payload": "admin_close"}
+            ]
+        ]
+        text = (
+            "🛠 **Админ-панель**\n\n"
+            f"Текущий текст: `{self.config.ad_text}`\n"
+            f"Текущая ссылка: `{self.config.ad_url}`\n\n"
+            "Выберите действие:"
+        )
+        await self.send_message(user_id, text, [{
+            "type": "inline_keyboard",
+            "payload": {"buttons": buttons}
+        }])
+
+    async def on_callback(self, update: Dict[str, Any]):
+        payload = update.get("payload")
+        sender_id = update.get("sender", {}).get("user_id")
+        
+        if sender_id not in self.config.admin_ids:
+            return
+
+        if payload == "admin_set_text":
+            self.admin_states[sender_id] = AdminState.AWAITING_AD_TEXT
+            await self.send_message(sender_id, "Введите новый текст для рекламной кнопки:")
+            
+        elif payload == "admin_set_link":
+            self.admin_states[sender_id] = AdminState.AWAITING_AD_LINK
+            await self.send_message(sender_id, "Введите новую URL-ссылку для рекламы (с http/https):")
+            
+        elif payload == "admin_close":
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, "Админ-панель закрыта. Для вызова используйте /admin")
+
+    async def run(self):
+        await self.get_me()
+        marker = None
+        logger.info("Bot started polling...")
+        
+        while True:
+            try:
+                params = {"limit": 100, "timeout": 30}
+                if marker:
+                    params["marker"] = marker
+                
+                r = await self.client.get("/updates", params=params)
+                r.raise_for_status()
+                data = r.json()
+                
+                updates = data.get("updates") or []
+                for u in updates:
+                    if isinstance(u, dict):
+                        await self.handle_update(u)
+                
+                # Обновляем маркер для следующей итерации
+                new_marker = data.get("marker")
+                if new_marker is not None:
+                    marker = new_marker
+            except httpx.HTTPError as e:
+                logger.error(f"Polling HTTP error: {e}")
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Polling error: {e}")
+                await asyncio.sleep(5)
+
+async def main():
+    token = os.environ.get("MAX_BOT_TOKEN")
+    if not token:
+        logger.error("MAX_BOT_TOKEN not found in environment!")
+        return
+
+    config = Config()
+    
+    # Приоритет переменным из окружения, если в файле пусто
+    env_channel = os.environ.get("CHANNEL_CHAT_ID", "0")
+    if not config.channel_id and env_channel != "0":
+        config.channel_id = int(env_channel)
+        
+    env_comments_id = os.environ.get("COMMENTS_CHAT_ID", "0")
+    if not config.comments_chat_id and env_comments_id != "0":
+        config.comments_chat_id = int(env_comments_id)
+        
+    env_comments_link = os.environ.get("COMMENTS_CHAT_LINK", "")
+    if not config.comments_chat_link and env_comments_link:
+        config.comments_chat_link = env_comments_link
+        
+    env_admins = os.environ.get("ADMIN_USER_IDS", "")
+    if not config.admin_ids and env_admins:
+        config.admin_ids = [int(x.strip()) for x in env_admins.split(",") if x.strip()]
+    
+    config.save()
+
+    bot = MaxBot(token, config)
     try:
-        await bot.fetch_me()
-        await bot.poll_loop()
+        await bot.run()
     finally:
-        await bot.close()
-
+        await bot.client.aclose()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        pass
