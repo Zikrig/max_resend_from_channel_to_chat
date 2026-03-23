@@ -116,6 +116,8 @@ class MaxBot:
                 payload["attachments"] = attachments
             
             r = await self.client.put("/messages", params={"message_id": message_id}, json=payload)
+            if r.status_code != 200:
+                logger.error(f"Edit failed: {r.status_code} {r.text}")
             r.raise_for_status()
             return True
         except Exception as e:
@@ -207,11 +209,22 @@ class MaxBot:
         
         logger.info(f"Processing new channel post {mid}. Forwarding to comments chat first...")
 
-        # 1. Сначала пересылаем в чат комментариев, чтобы получить mid копии
+        # 1. Очищаем вложения от клавиатур и служебных полей GET-запроса
+        clean_atts = []
+        for a in atts:
+            if a.get("type") == "inline_keyboard":
+                continue
+            p = a.get("payload", {})
+            # Оставляем только те поля, которые нужны для переотправки (file_id и т.д.)
+            # Удаляем url, size, callback_id, так как они ломают POST/PUT
+            new_payload = {k: v for k, v in p.items() if k not in ("callback_id", "url", "size", "width", "height", "duration")}
+            clean_atts.append({"type": a.get("type"), "payload": new_payload})
+
+        # 2. Сначала пересылаем в чат комментариев
         new_mid = None
         if self.config.comments_chat_id:
-            copy_atts = list(atts)
             ad_buttons = self.get_standard_buttons(include_comments=False, include_ad=True)
+            copy_atts = list(clean_atts)
             if ad_buttons:
                 copy_atts.append({
                     "type": "inline_keyboard",
@@ -221,20 +234,19 @@ class MaxBot:
             new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
             if new_msg:
                 new_mid = new_msg.get("body", {}).get("mid")
-                # Закрепляем в чате комментариев
                 await self.pin_message(self.config.comments_chat_id, new_mid)
                 logger.info(f"Post forwarded and pinned in comments chat: {new_mid}")
 
-        # 2. Теперь редактируем пост в канале, добавляя кнопку со ссылкой на пересланный пост
-        # Если пересылка удалась, делаем диплинк на сообщение, иначе на чат
+        # 3. Редактируем оригинал в канале
+        # Используем https://max.ru/chat/{chat_id}/{mid} для перехода к сообщению
         if new_mid:
-            comment_url = f"max://chat/{self.config.comments_chat_id}/{new_mid}"
+            comment_url = f"https://max.ru/chat/{self.config.comments_chat_id}/{new_mid}"
         else:
             comment_url = self.config.comments_chat_link
 
-        new_atts = list(atts)
+        channel_atts = list(clean_atts)
         if comment_url:
-            new_atts.append({
+            channel_atts.append({
                 "type": "inline_keyboard",
                 "payload": {"buttons": [[{
                     "type": "link",
@@ -243,8 +255,10 @@ class MaxBot:
                 }]]}
             })
         
-        await self.edit_message(mid, text, new_atts)
-        logger.info(f"Original post {mid} edited with link to {comment_url}")
+        if await self.edit_message(mid, text, channel_atts):
+            logger.info(f"Original post {mid} edited with link to {comment_url}")
+        else:
+            logger.warning(f"Failed to edit original post {mid}. Checking logs for reason...")
 
     async def process_admin_message(self, msg: Dict[str, Any]):
         sender_id = msg.get("sender", {}).get("user_id")
