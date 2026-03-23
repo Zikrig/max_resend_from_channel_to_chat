@@ -227,8 +227,15 @@ class MaxBot:
             
             new_msg = await self.send_message(self.config.comments_chat_id, text, copy_atts)
             if new_msg:
-                new_mid = new_msg.get("body", {}).get("mid")
-                logger.info(f"Post forwarded to comments chat: {new_mid}")
+                # Логируем все поля, чтобы найти короткий ID (AZ0a_VPec8o)
+                logger.info(f"Forwarded message fields: {list(new_msg.keys())}")
+                body = new_msg.get("body", {})
+                logger.info(f"Forwarded body fields: {list(body.keys())}")
+                
+                # Пробуем найти короткий ID. В MAX он часто в поле 'id' или 'message_id'
+                new_mid = new_msg.get("id") or body.get("id") or body.get("mid")
+                
+                logger.info(f"Post forwarded to comments chat. Selected ID: {new_mid}")
 
         # 3. Редактируем оригинал в канале
         # Формируем ссылку на сообщение по вашему образцу: https://max.ru/c/{chat_id}/{msg_id_part}
