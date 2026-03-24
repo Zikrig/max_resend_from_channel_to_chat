@@ -49,7 +49,7 @@ class AdminState(Enum):
     AWAITING_CHAT_TEXT = "awaiting_chat_text"
     AWAITING_CHAT_LINK = "awaiting_chat_link"
     AWAITING_NEW_ADMIN = "awaiting_new_admin"
-    AWAITING_QUIET_HOURS = "awaiting_quiet_hours"
+    AWAITING_MUTE_RANGE = "awaiting_mute_range"
 
 
 def parse_admin_ids(raw: Any) -> List[int]:
@@ -116,17 +116,19 @@ class Config:
         self.comments_chat_text = os.environ.get("COMMENTS_CHAT_TEXT", "Чат комментариев")
         self.comments_chat_link = os.environ.get("COMMENTS_CHAT_LINK", "")
         self.quiet_hours = os.environ.get("QUIET_HOURS", "").strip()
+        self.chat_mute_enabled = os.environ.get("CHAT_MUTE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
         self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
         self.admin_ids: List[int] = []
 
         self.load()
         self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
         logger.info(
-            "Config initialized: channel=%s comments_chat=%s root_admins=%s config_admins=%s quiet_hours=%s",
+            "Config initialized: channel=%s comments_chat=%s root_admins=%s config_admins=%s chat_mute_enabled=%s quiet_hours=%s",
             self.channel_id,
             self.comments_chat_id,
             self.root_admin_ids,
             self.admin_ids,
+            self.chat_mute_enabled,
             self.quiet_hours or "-",
         )
 
@@ -141,6 +143,7 @@ class Config:
             self.comments_chat_text = data.get("comments_chat_text", self.comments_chat_text)
             self.comments_chat_link = data.get("comments_chat_link", self.comments_chat_link)
             self.quiet_hours = data.get("quiet_hours", self.quiet_hours)
+            self.chat_mute_enabled = bool(data.get("chat_mute_enabled", self.chat_mute_enabled))
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
             self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
             logger.info("Config loaded from file.")
@@ -157,6 +160,7 @@ class Config:
                         "comments_chat_text": self.comments_chat_text,
                         "comments_chat_link": self.comments_chat_link,
                         "admin_ids": self.admin_ids,
+                        "chat_mute_enabled": self.chat_mute_enabled,
                         "quiet_hours": self.quiet_hours,
                     },
                     f,
@@ -183,7 +187,10 @@ class MaxBot:
         )
 
     def in_quiet_hours(self) -> bool:
-        return is_time_in_range(datetime.now(MOSCOW_TZ).time(), self.config.quiet_hours)
+        return self.config.chat_mute_enabled and is_time_in_range(
+            datetime.now(MOSCOW_TZ).time(),
+            self.config.quiet_hours,
+        )
 
     async def get_me(self) -> None:
         try:
@@ -396,7 +403,7 @@ class MaxBot:
             await self.send_admins_submenu(sender_id)
             return
 
-        if state == AdminState.AWAITING_QUIET_HOURS:
+        if state == AdminState.AWAITING_MUTE_RANGE:
             try:
                 self.config.quiet_hours = normalize_quiet_hours(text)
             except ValueError:
@@ -404,15 +411,15 @@ class MaxBot:
                 return
             self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"Тихие часы обновлены: {self.config.quiet_hours} (МСК)")
-            await self.send_quiet_hours_submenu(sender_id)
+            await self.send_message(sender_id, f"Диапазон мута обновлен: {self.config.quiet_hours} (МСК)")
+            await self.send_chat_mute_submenu(sender_id)
 
     async def send_admin_menu(self, user_id: int) -> None:
         buttons = [
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
             [{"type": "callback", "text": "Ссылка на чат", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
-            [{"type": "callback", "text": "Тихие часы", "payload": "admin_quiet_hours_submenu"}],
+            [{"type": "callback", "text": "Мут чата", "payload": "admin_chat_mute_submenu"}],
         ]
         await self.send_message(user_id, "Админ-панель", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -451,15 +458,18 @@ class MaxBot:
         text = f"Админы\nДобавленные: {admins_text}"
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
-    async def send_quiet_hours_submenu(self, user_id: int) -> None:
+    async def send_chat_mute_submenu(self, user_id: int) -> None:
+        toggle_text = "Выключить мут" if self.config.chat_mute_enabled else "Включить мут"
         buttons = [
-            [{"type": "callback", "text": "Изменить диапазон", "payload": "admin_set_quiet_hours"}],
+            [{"type": "callback", "text": toggle_text, "payload": "admin_toggle_chat_mute"}],
+            [{"type": "callback", "text": "Изменить диапазон", "payload": "admin_set_mute_range"}],
             [{"type": "callback", "text": "Назад", "payload": "admin_menu"}],
         ]
         current = self.config.quiet_hours or "не настроены"
         text = (
-            "Тихие часы\n"
-            f"Текущий диапазон: {current}\n"
+            "Мут чата\n"
+            f"Статус: {'включен' if self.config.chat_mute_enabled else 'выключен'}\n"
+            f"Диапазон: {current}\n"
             "Часовой пояс: Europe/Moscow (МСК)"
         )
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
@@ -481,8 +491,8 @@ class MaxBot:
             await self.send_chat_link_submenu(sender_id)
         elif payload == "admin_admins_submenu":
             await self.send_admins_submenu(sender_id)
-        elif payload == "admin_quiet_hours_submenu":
-            await self.send_quiet_hours_submenu(sender_id)
+        elif payload == "admin_chat_mute_submenu":
+            await self.send_chat_mute_submenu(sender_id)
         elif payload == "admin_set_text":
             self.admin_states[sender_id] = AdminState.AWAITING_AD_TEXT
             await self.send_message(sender_id, "Введите новый текст рекламной кнопки:")
@@ -498,8 +508,16 @@ class MaxBot:
         elif payload == "admin_add_admin":
             self.admin_states[sender_id] = AdminState.AWAITING_NEW_ADMIN
             await self.send_message(sender_id, "Введите user_id нового админа:")
-        elif payload == "admin_set_quiet_hours":
-            self.admin_states[sender_id] = AdminState.AWAITING_QUIET_HOURS
+        elif payload == "admin_toggle_chat_mute":
+            self.config.chat_mute_enabled = not self.config.chat_mute_enabled
+            self.config.save()
+            await self.send_message(
+                sender_id,
+                f"Мут чата {'включен' if self.config.chat_mute_enabled else 'выключен'}",
+            )
+            await self.send_chat_mute_submenu(sender_id)
+        elif payload == "admin_set_mute_range":
+            self.admin_states[sender_id] = AdminState.AWAITING_MUTE_RANGE
             await self.send_message(sender_id, "Введите диапазон, например 12:00-14:00 или 21:33-07:00")
         elif isinstance(payload, str) and payload.startswith("admin_remove_admin:"):
             raw_admin_id = payload.split(":", 1)[1]
