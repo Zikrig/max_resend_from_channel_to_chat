@@ -36,15 +36,19 @@ class AdminState(Enum):
 def get_short_id(seq: Any) -> str:
     """Вычисляет короткий ID сообщения (как AZ0a_VPec8o) из поля seq."""
     try:
-        if not seq:
+        if seq is None:
             return ""
-        # Кодируем 8-байтовое число (Big Endian) в Base64 и убираем лишнее
-        b = struct.pack(">Q", int(seq))
-        # Используем стандартный Base64, заменяя + на - и / на _ (urlsafe)
-        # Убираем паддинг '=' и лидирующие нули (если они есть в байтах)
-        short = base64.urlsafe_b64encode(b).decode().rstrip("=")
-        # Обычно в MAX короткий ID это именно такая перепаковка seq
-        return short
+        # MAX использует специфическую перепаковку числа в Base64.
+        # Для 8-байтового seq (uint64) это обычно дает 11 символов.
+        val = int(seq)
+        # Упаковываем в 8 байт (big-endian)
+        b = struct.pack(">Q", val)
+        # Кодируем в url-safe base64 и убираем лишние нули в начале и паддинг в конце
+        s = base64.urlsafe_b64encode(b).decode().rstrip("=")
+        # Если в начале много 'A' (нули), MAX их иногда обрезает или заменяет.
+        # Но чаще всего используется именно полная строка без паддинга.
+        # Удаляем лидирующие 'A', которые соответствуют нулевым байтам в начале seq
+        return s.lstrip("A")
     except Exception:
         return ""
 
