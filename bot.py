@@ -272,26 +272,26 @@ class MaxBot:
         logger.info(f"Buttons for channel: join={join_link}, msg={msg_link}")
 
         channel_atts = list(clean_atts)
-        buttons_row = []
+        buttons = []
         
         if join_link:
-            buttons_row.append({
+            buttons.append([{
                 "type": "link",
                 "text": "Чат комментариев",
                 "url": join_link
-            })
+            }])
             
         if msg_link:
-            buttons_row.append({
+            buttons.append([{
                 "type": "link",
                 "text": "💬 Перейти к сообщению",
                 "url": msg_link
-            })
+            }])
 
-        if buttons_row:
+        if buttons:
             channel_atts.append({
                 "type": "inline_keyboard",
-                "payload": {"buttons": [buttons_row]}
+                "payload": {"buttons": buttons}
             })
         
         if await self.edit_message(mid, text, channel_atts):
