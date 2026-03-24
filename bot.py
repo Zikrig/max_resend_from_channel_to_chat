@@ -32,6 +32,7 @@ class AdminState(Enum):
     NONE = "none"
     AWAITING_AD_TEXT = "awaiting_ad_text"
     AWAITING_AD_LINK = "awaiting_ad_link"
+    AWAITING_CHAT_TEXT = "awaiting_chat_text"
     AWAITING_CHAT_LINK = "awaiting_chat_link"
 
 def get_short_id(seq: Any) -> str:
@@ -53,6 +54,7 @@ class Config:
         self.ad_url = os.environ.get("AD_URL", "https://max.ru")
         self.channel_id = int(os.environ.get("CHANNEL_CHAT_ID", "0"))
         self.comments_chat_id = int(os.environ.get("COMMENTS_CHAT_ID", "0"))
+        self.comments_chat_text = os.environ.get("COMMENTS_CHAT_TEXT", "Чат комментариев")
         self.comments_chat_link = os.environ.get("COMMENTS_CHAT_LINK", "")
         
         raw_admins = os.environ.get("ADMIN_USER_IDS", "")
@@ -68,6 +70,7 @@ class Config:
                     data = json.load(f)
                     self.ad_text = data.get("ad_text", self.ad_text)
                     self.ad_url = data.get("ad_url", self.ad_url)
+                    self.comments_chat_text = data.get("comments_chat_text", self.comments_chat_text)
                     self.comments_chat_link = data.get("comments_chat_link", self.comments_chat_link)
                     logger.info("Config loaded from file.")
             except Exception as e:
@@ -79,6 +82,7 @@ class Config:
                 json.dump({
                     "ad_text": self.ad_text,
                     "ad_url": self.ad_url,
+                    "comments_chat_text": self.comments_chat_text,
                     "comments_chat_link": self.comments_chat_link
                 }, f, ensure_ascii=False, indent=2)
                 logger.info("Config saved to file.")
@@ -191,10 +195,11 @@ class MaxBot:
 
         msg_link = f"https://max.ru/c/{self.config.comments_chat_id}/{new_mid}" if new_mid else ""
         join_link = self.config.comments_chat_link
+        join_text = self.config.comments_chat_text
 
         channel_atts = list(clean_atts)
         buttons = []
-        if join_link: buttons.append([{"type": "link", "text": "Чат комментариев", "url": join_link}])
+        if join_link: buttons.append([{"type": "link", "text": join_text, "url": join_link}])
         if msg_link: buttons.append([{"type": "link", "text": "💬 Перейти к сообщению", "url": msg_link}])
 
         if buttons: channel_atts.append({"type": "inline_keyboard", "payload": {"buttons": buttons}})
@@ -234,6 +239,12 @@ class MaxBot:
             self.admin_states[sender_id] = AdminState.NONE
             await self.send_message(sender_id, f"✅ Ссылка на чат изменена")
             await self.send_chat_link_submenu(sender_id)
+        elif state == AdminState.AWAITING_CHAT_TEXT:
+            self.config.comments_chat_text = text
+            self.config.save()
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, f"✅ Текст кнопки чата изменен на: {text}")
+            await self.send_chat_link_submenu(sender_id)
 
     async def send_admin_menu(self, user_id: int):
         buttons = [
@@ -253,10 +264,12 @@ class MaxBot:
 
     async def send_chat_link_submenu(self, user_id: int):
         buttons = [
+            [{"type": "callback", "text": "📝 Изменить текст кнопки", "payload": "admin_set_chat_text"}],
             [{"type": "callback", "text": "🔗 Изменить ссылку на чат", "payload": "admin_set_chat_link"}],
             [{"type": "callback", "text": "🔙 Назад", "payload": "admin_menu"}]
         ]
-        await self.send_message(user_id, f"Ссылка на чат:\n{self.config.comments_chat_link}", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
+        text = f"Чат комментариев:\nТекст: {self.config.comments_chat_text}\nURL: {self.config.comments_chat_link}"
+        await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def on_callback(self, update: Dict[str, Any]):
         callback_data = update.get("callback", {})
@@ -278,6 +291,9 @@ class MaxBot:
         elif payload == "admin_set_chat_link":
             self.admin_states[sender_id] = AdminState.AWAITING_CHAT_LINK
             await self.send_message(sender_id, "Введите новую ссылку на чат:")
+        elif payload == "admin_set_chat_text":
+            self.admin_states[sender_id] = AdminState.AWAITING_CHAT_TEXT
+            await self.send_message(sender_id, "Введите новый текст для кнопки чата:")
 
     async def run(self):
         await self.get_me()
