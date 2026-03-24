@@ -120,6 +120,7 @@ class Config:
         self.admin_ids: List[int] = []
 
         self.load()
+        self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
         logger.info(
             "Config initialized: channel=%s comments_chat=%s root_admins=%s config_admins=%s quiet_hours=%s",
             self.channel_id,
@@ -141,6 +142,7 @@ class Config:
             self.comments_chat_link = data.get("comments_chat_link", self.comments_chat_link)
             self.quiet_hours = data.get("quiet_hours", self.quiet_hours)
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
+            self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
             logger.info("Config loaded from file.")
         except Exception as e:
             logger.error("Failed to load config file: %s", e)
@@ -381,6 +383,11 @@ class MaxBot:
                 new_admin_id = int(text)
             except ValueError:
                 await self.send_message(sender_id, "Нужно отправить только числовой user_id нового админа.")
+                return
+            if new_admin_id in self.config.root_admin_ids:
+                self.admin_states[sender_id] = AdminState.NONE
+                await self.send_message(sender_id, "Этот админ уже задан в .env и не входит в управляемый список.")
+                await self.send_admins_submenu(sender_id)
                 return
             self.config.admin_ids = sorted(set(self.config.admin_ids + [new_admin_id]))
             self.config.save()
