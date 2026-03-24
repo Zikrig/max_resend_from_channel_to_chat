@@ -1,2 +1,5 @@
 /.env
 .env.test
+config.json
+.env.fight
+/__pycache__
