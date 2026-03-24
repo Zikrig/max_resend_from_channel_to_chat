@@ -116,15 +116,15 @@ class Config:
         self.comments_chat_text = os.environ.get("COMMENTS_CHAT_TEXT", "Чат комментариев")
         self.comments_chat_link = os.environ.get("COMMENTS_CHAT_LINK", "")
         self.quiet_hours = os.environ.get("QUIET_HOURS", "").strip()
-        self._env_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
-        self.admin_ids = list(self._env_admin_ids)
+        self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
+        self.admin_ids: List[int] = []
 
         self.load()
-        self.admin_ids = sorted(set(self.admin_ids) | set(self._env_admin_ids))
         logger.info(
-            "Config initialized: channel=%s comments_chat=%s admins=%s quiet_hours=%s",
+            "Config initialized: channel=%s comments_chat=%s root_admins=%s config_admins=%s quiet_hours=%s",
             self.channel_id,
             self.comments_chat_id,
+            self.root_admin_ids,
             self.admin_ids,
             self.quiet_hours or "-",
         )
@@ -176,7 +176,9 @@ class MaxBot:
         self.admin_states: Dict[int, AdminState] = {}
 
     def is_admin(self, user_id: int | None) -> bool:
-        return user_id is not None and user_id in self.config.admin_ids
+        return user_id is not None and (
+            user_id in self.config.root_admin_ids or user_id in self.config.admin_ids
+        )
 
     def in_quiet_hours(self) -> bool:
         return is_time_in_range(datetime.now(MOSCOW_TZ).time(), self.config.quiet_hours)
@@ -430,12 +432,16 @@ class MaxBot:
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_admins_submenu(self, user_id: int) -> None:
+        admins_text = ", ".join(str(admin_id) for admin_id in self.config.admin_ids) or "-"
         buttons = [
             [{"type": "callback", "text": "Добавить админа", "payload": "admin_add_admin"}],
-            [{"type": "callback", "text": "Назад", "payload": "admin_menu"}],
         ]
-        admins_text = ", ".join(str(admin_id) for admin_id in self.config.admin_ids) or "-"
-        text = f"Админы\nСписок: {admins_text}"
+        for admin_id in self.config.admin_ids:
+            buttons.append(
+                [{"type": "callback", "text": f"Удалить {admin_id}", "payload": f"admin_remove_admin:{admin_id}"}]
+            )
+        buttons.append([{"type": "callback", "text": "Назад", "payload": "admin_menu"}])
+        text = f"Админы\nДобавленные: {admins_text}"
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_quiet_hours_submenu(self, user_id: int) -> None:
@@ -488,6 +494,17 @@ class MaxBot:
         elif payload == "admin_set_quiet_hours":
             self.admin_states[sender_id] = AdminState.AWAITING_QUIET_HOURS
             await self.send_message(sender_id, "Введите диапазон, например 12:00-14:00 или 21:33-07:00")
+        elif isinstance(payload, str) and payload.startswith("admin_remove_admin:"):
+            raw_admin_id = payload.split(":", 1)[1]
+            try:
+                remove_admin_id = int(raw_admin_id)
+            except ValueError:
+                await self.send_message(sender_id, "Некорректный user_id для удаления.")
+                return
+            self.config.admin_ids = [admin_id for admin_id in self.config.admin_ids if admin_id != remove_admin_id]
+            self.config.save()
+            await self.send_message(sender_id, f"Админ удален: {remove_admin_id}")
+            await self.send_admins_submenu(sender_id)
 
     async def run(self) -> None:
         await self.get_me()
