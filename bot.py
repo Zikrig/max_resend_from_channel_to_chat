@@ -322,17 +322,19 @@ class MaxBot:
         if self.config.comments_chat_id and short_message_id:
             message_link = f"https://max.ru/c/{self.config.comments_chat_id}/{short_message_id}"
 
-        channel_buttons: List[List[Dict]] = []
+        channel_buttons_row: List[Dict] = []
         if self.config.comments_chat_link:
-            channel_buttons.append(
-                [{"type": "link", "text": self.config.comments_chat_text, "url": self.config.comments_chat_link}]
+            channel_buttons_row.append(
+                {"type": "link", "text": self.config.comments_chat_text, "url": self.config.comments_chat_link}
             )
         if message_link:
-            channel_buttons.append([{"type": "link", "text": "💬 Перейти к сообщению", "url": message_link}])
+            channel_buttons_row.append({"type": "link", "text": "💬 Перейти к сообщению", "url": message_link})
 
         channel_attachments = list(clean_attachments)
-        if channel_buttons:
-            channel_attachments.append({"type": "inline_keyboard", "payload": {"buttons": channel_buttons}})
+        if channel_buttons_row:
+            channel_attachments.append(
+                {"type": "inline_keyboard", "payload": {"buttons": [channel_buttons_row]}}
+            )
 
         if message_id:
             await self.edit_message(message_id, text, channel_attachments)
