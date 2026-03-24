@@ -48,6 +48,7 @@ class AdminState(Enum):
     AWAITING_AD_LINK = "awaiting_ad_link"
     AWAITING_CHAT_TEXT = "awaiting_chat_text"
     AWAITING_CHAT_LINK = "awaiting_chat_link"
+    AWAITING_COMMENTS_MESSAGE_BUTTON_TEXT = "awaiting_comments_message_button_text"
     AWAITING_NEW_ADMIN = "awaiting_new_admin"
     AWAITING_MUTE_RANGE = "awaiting_mute_range"
 
@@ -115,6 +116,9 @@ class Config:
         self.comments_chat_id = int(os.environ.get("COMMENTS_CHAT_ID", "0"))
         self.comments_chat_text = os.environ.get("COMMENTS_CHAT_TEXT", "Чат комментариев")
         self.comments_chat_link = os.environ.get("COMMENTS_CHAT_LINK", "")
+        self.comments_message_button_text = os.environ.get(
+            "COMMENTS_MESSAGE_BUTTON_TEXT", "💬 Перейти к сообщению"
+        )
         self.quiet_hours = os.environ.get("QUIET_HOURS", "").strip()
         self.chat_mute_enabled = os.environ.get("CHAT_MUTE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
         self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
@@ -142,6 +146,9 @@ class Config:
             self.ad_url = data.get("ad_url", self.ad_url)
             self.comments_chat_text = data.get("comments_chat_text", self.comments_chat_text)
             self.comments_chat_link = data.get("comments_chat_link", self.comments_chat_link)
+            self.comments_message_button_text = data.get(
+                "comments_message_button_text", self.comments_message_button_text
+            )
             self.quiet_hours = data.get("quiet_hours", self.quiet_hours)
             self.chat_mute_enabled = bool(data.get("chat_mute_enabled", self.chat_mute_enabled))
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
@@ -159,6 +166,7 @@ class Config:
                         "ad_url": self.ad_url,
                         "comments_chat_text": self.comments_chat_text,
                         "comments_chat_link": self.comments_chat_link,
+                        "comments_message_button_text": self.comments_message_button_text,
                         "admin_ids": self.admin_ids,
                         "chat_mute_enabled": self.chat_mute_enabled,
                         "quiet_hours": self.quiet_hours,
@@ -327,8 +335,14 @@ class MaxBot:
             channel_buttons_row.append(
                 {"type": "link", "text": self.config.comments_chat_text, "url": self.config.comments_chat_link}
             )
-        if message_link:
-            channel_buttons_row.append({"type": "link", "text": "💬 Перейти к сообщению", "url": message_link})
+        if message_link and (self.config.comments_message_button_text or "").strip():
+            channel_buttons_row.append(
+                {
+                    "type": "link",
+                    "text": self.config.comments_message_button_text.strip(),
+                    "url": message_link,
+                }
+            )
 
         channel_attachments = list(clean_attachments)
         if channel_buttons_row:
@@ -387,6 +401,14 @@ class MaxBot:
             await self.send_chat_link_submenu(sender_id)
             return
 
+        if state == AdminState.AWAITING_COMMENTS_MESSAGE_BUTTON_TEXT:
+            self.config.comments_message_button_text = text
+            self.config.save()
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, f"Текст кнопки к сообщению изменен: {text}")
+            await self.send_chat_link_submenu(sender_id)
+            return
+
         if state == AdminState.AWAITING_NEW_ADMIN:
             try:
                 new_admin_id = int(text)
@@ -413,7 +435,7 @@ class MaxBot:
                 return
             self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"Диапазон мута обновлен: {self.config.quiet_hours} (МСК)")
+            await self.send_message(sender_id, f"Диапазон Mute обновлен: {self.config.quiet_hours} (МСК)")
             await self.send_chat_mute_submenu(sender_id)
 
     async def send_admin_menu(self, user_id: int) -> None:
@@ -421,7 +443,7 @@ class MaxBot:
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
             [{"type": "callback", "text": "Ссылка на чат", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
-            [{"type": "callback", "text": "Мут чата", "payload": "admin_chat_mute_submenu"}],
+            [{"type": "callback", "text": "Mute чата", "payload": "admin_chat_mute_submenu"}],
         ]
         await self.send_message(user_id, "Админ-панель", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -438,12 +460,16 @@ class MaxBot:
         buttons = [
             [{"type": "callback", "text": "Изменить текст кнопки", "payload": "admin_set_chat_text"}],
             [{"type": "callback", "text": "Изменить ссылку на чат", "payload": "admin_set_chat_link"}],
+            [{"type": "callback", "text": "Кнопка на комментарий", "payload": "admin_set_comments_message_button_text"}],
             [{"type": "callback", "text": "Назад", "payload": "admin_menu"}],
         ]
         text = (
-            f"Кнопка чата\n"
+            "Кнопка чата\n"
             f"Текст: {self.config.comments_chat_text}\n"
-            f"Ссылка: {self.config.comments_chat_link}"
+            f"Ссылка: {self.config.comments_chat_link}\n"
+            "\n"
+            "Кнопка к сообщению в чате\n"
+            f"Текст: {self.config.comments_message_button_text}"
         )
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -461,7 +487,7 @@ class MaxBot:
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_chat_mute_submenu(self, user_id: int) -> None:
-        toggle_text = "Выключить мут" if self.config.chat_mute_enabled else "Включить мут"
+        toggle_text = "Выключить Mute" if self.config.chat_mute_enabled else "Включить Mute"
         buttons = [
             [{"type": "callback", "text": toggle_text, "payload": "admin_toggle_chat_mute"}],
             [{"type": "callback", "text": "Изменить диапазон", "payload": "admin_set_mute_range"}],
@@ -469,7 +495,7 @@ class MaxBot:
         ]
         current = self.config.quiet_hours or "не настроены"
         text = (
-            "Мут чата\n"
+            "Mute чата\n"
             f"Статус: {'включен' if self.config.chat_mute_enabled else 'выключен'}\n"
             f"Диапазон: {current}\n"
             "Часовой пояс: Europe/Moscow (МСК)"
@@ -507,6 +533,12 @@ class MaxBot:
         elif payload == "admin_set_chat_link":
             self.admin_states[sender_id] = AdminState.AWAITING_CHAT_LINK
             await self.send_message(sender_id, "Введите новую ссылку на чат:")
+        elif payload == "admin_set_comments_message_button_text":
+            self.admin_states[sender_id] = AdminState.AWAITING_COMMENTS_MESSAGE_BUTTON_TEXT
+            await self.send_message(
+                sender_id,
+                "Введите новый текст кнопки, которая ведёт к конкретному сообщению в чате комментариев:",
+            )
         elif payload == "admin_add_admin":
             self.admin_states[sender_id] = AdminState.AWAITING_NEW_ADMIN
             await self.send_message(sender_id, "Введите user_id нового админа:")
@@ -515,7 +547,7 @@ class MaxBot:
             self.config.save()
             await self.send_message(
                 sender_id,
-                f"Мут чата {'включен' if self.config.chat_mute_enabled else 'выключен'}",
+                f"Mute чата {'включен' if self.config.chat_mute_enabled else 'выключен'}",
             )
             await self.send_chat_mute_submenu(sender_id)
         elif payload == "admin_set_mute_range":
