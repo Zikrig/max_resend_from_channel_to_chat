@@ -36,19 +36,15 @@ class AdminState(Enum):
 def get_short_id(seq: Any) -> str:
     """Вычисляет короткий ID сообщения (как AZ0a_VPec8o) из поля seq."""
     try:
-        if seq is None:
+        if not seq:
             return ""
-        # MAX использует специфическую перепаковку числа в Base64.
-        # Для 8-байтового seq (uint64) это обычно дает 11 символов.
-        val = int(seq)
-        # Упаковываем в 8 байт (big-endian)
-        b = struct.pack(">Q", val)
-        # Кодируем в url-safe base64 и убираем лишние нули в начале и паддинг в конце
-        s = base64.urlsafe_b64encode(b).decode().rstrip("=")
-        # Если в начале много 'A' (нули), MAX их иногда обрезает или заменяет.
-        # Но чаще всего используется именно полная строка без паддинга.
-        # Удаляем лидирующие 'A', которые соответствуют нулевым байтам в начале seq
-        return s.lstrip("A")
+        # Кодируем 8-байтовое число (Big Endian) в Base64 и убираем лишнее
+        b = struct.pack(">Q", int(seq))
+        # Используем стандартный Base64, заменяя + на - и / на _ (urlsafe)
+        # Убираем паддинг '=' и лидирующие нули (если они есть в байтах)
+        short = base64.urlsafe_b64encode(b).decode().rstrip("=")
+        # Обычно в MAX короткий ID это именно такая перепаковка seq
+        return short
     except Exception:
         return ""
 
@@ -264,34 +260,42 @@ class MaxBot:
                 logger.info(f"Post forwarded to comments chat. seq={seq}, Selected ID: {new_mid}")
 
         # 3. Редактируем оригинал в канале
-        # Формируем ссылку на сообщение по вашему образцу: https://max.ru/c/{chat_id}/{msg_id_part}
+        # Формируем ссылку на конкретное сообщение
+        msg_link = ""
         if new_mid:
-            # Вырезаем префикс 'mid.' если он есть
             msg_id_part = str(new_mid).split(".")[-1]
-            comment_url = f"https://max.ru/c/{self.config.comments_chat_id}/{msg_id_part}"
-        elif self.config.comments_chat_link:
-            # Fallback на инвайт-ссылку
-            comment_url = self.config.comments_chat_link
-        else:
-            comment_url = ""
+            msg_link = f"https://max.ru/c/{self.config.comments_chat_id}/{msg_id_part}"
+        
+        # Ссылка на вступление в чат
+        join_link = self.config.comments_chat_link
 
-        logger.info(f"Final comment_url for button: {comment_url}")
+        logger.info(f"Buttons for channel: join={join_link}, msg={msg_link}")
 
         channel_atts = list(clean_atts)
-        if comment_url:
+        buttons_row = []
+        
+        if join_link:
+            buttons_row.append({
+                "type": "link",
+                "text": "Чат комментариев",
+                "url": join_link
+            })
+            
+        if msg_link:
+            buttons_row.append({
+                "type": "link",
+                "text": "💬 Перейти к сообщению",
+                "url": msg_link
+            })
+
+        if buttons_row:
             channel_atts.append({
                 "type": "inline_keyboard",
-                "payload": {"buttons": [[{
-                    "type": "link",
-                    "text": "💬 Комментарии",
-                    "url": comment_url
-                }]]}
+                "payload": {"buttons": [buttons_row]}
             })
         
         if await self.edit_message(mid, text, channel_atts):
-            logger.info(f"Original post {mid} edited with link to {comment_url}")
-        else:
-            logger.warning(f"Failed to edit original post {mid}. Checking logs for reason...")
+            logger.info(f"Original post {mid} edited with two buttons.")
 
     async def process_admin_message(self, msg: Dict[str, Any]):
         sender_id = msg.get("sender", {}).get("user_id")
