@@ -141,28 +141,46 @@ def try_parse_chat_id_from_text(text: str) -> Optional[int]:
     return None
 
 
-def channel_admin_permissions_ok(m: dict) -> bool:
-    if m.get("is_owner"):
-        return True
-    if not m.get("is_admin"):
-        return False
-    perms = m.get("permissions")
-    if not perms:
-        return True
-    pset = set(perms)
-    return bool(pset & {"edit_message", "post_edit_delete_message"})
+def membership_summary(m: dict) -> str:
+    try:
+        return json.dumps(
+            {
+                "is_owner": m.get("is_owner"),
+                "is_admin": m.get("is_admin"),
+                "permissions": m.get("permissions"),
+            },
+            ensure_ascii=False,
+        )
+    except Exception:
+        return str(m)
 
 
-def comments_chat_admin_permissions_ok(m: dict) -> bool:
+def check_channel_admin_permissions(m: dict) -> tuple[bool, str]:
+    """Редактирование постов в канале: владелец; или явные edit_* в permissions; или админ без списка (все права)."""
     if m.get("is_owner"):
-        return True
-    if not m.get("is_admin"):
-        return False
-    perms = m.get("permissions")
-    if not perms:
-        return True
-    pset = set(perms)
-    return "write" in pset and "delete_message" in pset
+        return True, "owner"
+    perms = set(m.get("permissions") or [])
+    if perms & {"edit_message", "post_edit_delete_message"}:
+        return True, "explicit_edit_permission"
+    if m.get("is_admin") and not perms:
+        return True, "admin_no_explicit_permissions"
+    if m.get("is_admin"):
+        return False, f"admin_but_no_edit_flags permissions={sorted(perms)}"
+    return False, f"no_owner_or_edit is_admin={m.get('is_admin')} permissions={sorted(perms)}"
+
+
+def check_comments_chat_admin_permissions(m: dict) -> tuple[bool, str]:
+    """Чат комментариев: владелец; или write+delete_message; или админ без списка."""
+    if m.get("is_owner"):
+        return True, "owner"
+    perms = set(m.get("permissions") or [])
+    if "write" in perms and "delete_message" in perms:
+        return True, "write_and_delete_message"
+    if m.get("is_admin") and not perms:
+        return True, "admin_no_explicit_permissions"
+    if m.get("is_admin"):
+        return False, f"admin_but_missing_write_or_delete permissions={sorted(perms)}"
+    return False, f"no_owner_or_write_delete is_admin={m.get('is_admin')} permissions={sorted(perms)}"
 
 
 class Config:
@@ -449,11 +467,28 @@ class MaxBot:
         try:
             r = await self.client.get(f"/chats/{chat_id}/members/me")
             if r.status_code != 200:
+                body = (r.text or "").strip()
+                snippet = (body[:800] + "…") if len(body) > 800 else body
+                logger.warning(
+                    "GET /chats/%s/members/me failed: HTTP %s body=%r",
+                    chat_id,
+                    r.status_code,
+                    snippet,
+                )
                 return None, f"Не удалось проверить права бота (HTTP {r.status_code})."
             data = r.json()
-            return (data if isinstance(data, dict) else None), ""
+            if not isinstance(data, dict):
+                logger.warning("GET /chats/%s/members/me: unexpected JSON type %s", chat_id, type(data))
+                return None, "Некорректный ответ API при проверке прав."
+            logger.info(
+                "members/me chat_id=%s membership=%s",
+                chat_id,
+                membership_summary(data),
+            )
+            return data, ""
         except Exception as e:
-            return None, str(e)
+            logger.exception("GET /chats/%s/members/me exception", chat_id)
+            return None, str(e) or repr(e)
 
     async def handle_update(self, update: Dict[str, Any]) -> None:
         update_type = update.get("update_type")
@@ -610,13 +645,21 @@ class MaxBot:
             if merr or not mem:
                 await self.send_message(sender_id, merr or "Ошибка проверки прав бота.")
                 return
-            if not channel_admin_permissions_ok(mem):
+            ok_ch, reason_ch = check_channel_admin_permissions(mem)
+            if not ok_ch:
+                logger.warning(
+                    "Канал chat_id=%s: проверка прав не пройдена (%s) raw=%s",
+                    cid,
+                    reason_ch,
+                    membership_summary(mem),
+                )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором канала с правом редактировать сообщения."
-                    " (или владельцем канала)",
+                    "Бот должен быть администратором канала с правом редактировать сообщения "
+                    "(или владельцем). Если доступы уже выданы — пришлите фрагмент лога members/me из сервера.",
                 )
                 return
+            logger.info("Канал chat_id=%s: проверка прав OK (%s)", cid, reason_ch)
             for b in self.config.channel_bindings:
                 if int(b["channel_id"]) == cid:
                     await self.send_message(sender_id, "Этот канал уже подключён. Удалите запись в меню «Каналы» перед повторной привязкой.")
@@ -656,12 +699,21 @@ class MaxBot:
             if merr or not mem:
                 await self.send_message(sender_id, merr or "Ошибка проверки прав бота.")
                 return
-            if not comments_chat_admin_permissions_ok(mem):
+            ok_cc, reason_cc = check_comments_chat_admin_permissions(mem)
+            if not ok_cc:
+                logger.warning(
+                    "Чат комментариев chat_id=%s: проверка прав не пройдена (%s) raw=%s",
+                    ccid,
+                    reason_cc,
+                    membership_summary(mem),
+                )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором чата с правами писать и удалять сообщения (или владельцем).",
+                    "Бот должен быть администратором чата с правами писать и удалять сообщения "
+                    "(или владельцем). Если доступы уже выданы — см. лог members/me на сервере.",
                 )
                 return
+            logger.info("Чат комментариев chat_id=%s: проверка прав OK (%s)", ccid, reason_cc)
             t = text.strip()
             if try_parse_chat_id_from_text(t) is not None:
                 invite_url = ((cinfo or {}).get("link") or "").strip()
@@ -914,7 +966,11 @@ class MaxBot:
                         await self.handle_update(update)
                 marker = data.get("marker")
             except Exception as e:
-                logger.error("Error: %s", e)
+                logger.exception(
+                    "Polling /updates failed: %s: %r",
+                    type(e).__name__,
+                    e,
+                )
                 await asyncio.sleep(5)
 
 
