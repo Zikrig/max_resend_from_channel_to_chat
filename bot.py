@@ -2,7 +2,7 @@
 MAX-бот:
 1. Добавляет кнопки к постам в канале и пересылает пост в чат комментариев (привязка канал→чат в /admin → «Каналы»).
 2. Реклама под постом в чате — одна на все каналы (текст и ссылка в /admin).
-3. Управляет кнопками, админами и мутом чата через /admin.
+3. Управляет кнопками и админами через /admin; мут чата комментариев — отдельно для каждого канала (Каналы → Mute).
 """
 
 from __future__ import annotations
@@ -193,8 +193,6 @@ class Config:
         self.comments_message_button_text = os.environ.get(
             "COMMENTS_MESSAGE_BUTTON_TEXT", "💬 Перейти к сообщению"
         )
-        self.quiet_hours = os.environ.get("QUIET_HOURS", "").strip()
-        self.chat_mute_enabled = os.environ.get("CHAT_MUTE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
         self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
         self.admin_ids: List[int] = []
         self.channel_bindings: List[Dict[str, Any]] = []
@@ -202,12 +200,10 @@ class Config:
         self.load()
         self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
         logger.info(
-            "Config initialized: bindings=%s root_admins=%s config_admins=%s chat_mute_enabled=%s quiet_hours=%s",
+            "Config initialized: bindings=%s root_admins=%s config_admins=%s",
             len(self.channel_bindings),
             self.root_admin_ids,
             self.admin_ids,
-            self.chat_mute_enabled,
-            self.quiet_hours or "-",
         )
 
     def load(self) -> None:
@@ -222,8 +218,6 @@ class Config:
             self.comments_message_button_text = data.get(
                 "comments_message_button_text", self.comments_message_button_text
             )
-            self.quiet_hours = data.get("quiet_hours", self.quiet_hours)
-            self.chat_mute_enabled = bool(data.get("chat_mute_enabled", self.chat_mute_enabled))
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
             self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
             self.channel_bindings = self._load_channel_bindings(data)
@@ -232,6 +226,9 @@ class Config:
             logger.error("Failed to load config file: %s", e)
 
     def _load_channel_bindings(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        migrate_mute = bool(data.get("chat_mute_enabled", False))
+        migrate_qh = str(data.get("quiet_hours", "")).strip()
+
         raw = data.get("channel_bindings")
         if isinstance(raw, list) and raw:
             out: List[Dict[str, Any]] = []
@@ -246,6 +243,14 @@ class Config:
                     continue
                 if not link:
                     continue
+                if "chat_mute_enabled" in item:
+                    mute_en = bool(item["chat_mute_enabled"])
+                else:
+                    mute_en = migrate_mute
+                if "quiet_hours" in item:
+                    qh = str(item.get("quiet_hours") or "").strip()
+                else:
+                    qh = migrate_qh
                 out.append(
                     {
                         "channel_id": cid,
@@ -253,6 +258,8 @@ class Config:
                         "comments_chat_link": link,
                         "channel_title": (item.get("channel_title") or "") or None,
                         "comments_chat_title": (item.get("comments_chat_title") or "") or None,
+                        "chat_mute_enabled": mute_en,
+                        "quiet_hours": qh,
                     }
                 )
             return out
@@ -272,6 +279,8 @@ class Config:
                             "comments_chat_link": link,
                             "channel_title": None,
                             "comments_chat_title": None,
+                            "chat_mute_enabled": migrate_mute,
+                            "quiet_hours": migrate_qh,
                         }
                     ]
         except (TypeError, ValueError):
@@ -281,6 +290,12 @@ class Config:
     def binding_for_channel(self, channel_id: int) -> Optional[Dict[str, Any]]:
         for b in self.channel_bindings:
             if int(b["channel_id"]) == int(channel_id):
+                return b
+        return None
+
+    def binding_for_comments_chat(self, comments_chat_id: int) -> Optional[Dict[str, Any]]:
+        for b in self.channel_bindings:
+            if int(b["comments_chat_id"]) == int(comments_chat_id):
                 return b
         return None
 
@@ -301,8 +316,6 @@ class Config:
                         "comments_message_button_text": self.comments_message_button_text,
                         "channel_bindings": self.channel_bindings,
                         "admin_ids": self.admin_ids,
-                        "chat_mute_enabled": self.chat_mute_enabled,
-                        "quiet_hours": self.quiet_hours,
                     },
                     f,
                     ensure_ascii=False,
@@ -322,17 +335,20 @@ class MaxBot:
         self.bot_id: int | None = None
         self.admin_states: Dict[int, AdminState] = {}
         self.channel_bind_draft: Dict[int, Dict[str, Any]] = {}
+        self.mute_range_channel_id: Dict[int, int] = {}
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and (
             user_id in self.config.root_admin_ids or user_id in self.config.admin_ids
         )
 
-    def in_quiet_hours(self) -> bool:
-        return self.config.chat_mute_enabled and is_time_in_range(
-            datetime.now(MOSCOW_TZ).time(),
-            self.config.quiet_hours,
-        )
+    def binding_in_quiet_hours(self, binding: Dict[str, Any]) -> bool:
+        if not binding.get("chat_mute_enabled"):
+            return False
+        qh = str(binding.get("quiet_hours") or "").strip()
+        if not qh:
+            return False
+        return is_time_in_range(datetime.now(MOSCOW_TZ).time(), qh)
 
     async def get_me(self) -> None:
         try:
@@ -513,15 +529,17 @@ class MaxBot:
             await self.process_channel_post(msg)
             return
 
-        if (
-            chat_id is not None
-            and chat_id in self.config.all_comments_chat_ids()
-            and message_id
-            and self.in_quiet_hours()
-        ):
-            logger.info("Deleting message %s due to quiet hours %s", message_id, self.config.quiet_hours)
-            await self.delete_message(message_id)
-            return
+        if chat_id is not None and chat_id in self.config.all_comments_chat_ids() and message_id:
+            bind = self.config.binding_for_comments_chat(chat_id)
+            if bind and self.binding_in_quiet_hours(bind):
+                logger.info(
+                    "Deleting message %s due to quiet hours %s (channel_id=%s)",
+                    message_id,
+                    bind.get("quiet_hours"),
+                    bind.get("channel_id"),
+                )
+                await self.delete_message(message_id)
+                return
 
         if self.is_admin(sender_id):
             public_ids = self.config.all_channel_ids() | self.config.all_comments_chat_ids()
@@ -607,6 +625,7 @@ class MaxBot:
         if text.lower() == "/admin":
             self.admin_states[sender_id] = AdminState.NONE
             self.channel_bind_draft.pop(sender_id, None)
+            self.mute_range_channel_id.pop(sender_id, None)
             await self.send_admin_menu(sender_id)
             return
 
@@ -656,7 +675,8 @@ class MaxBot:
                 )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором канала с правом редактировать сообщения ",
+                    "Бот должен быть администратором канала с правом редактировать сообщения "
+                    "(или владельцем). Если доступы уже выданы — см. лог members/me на сервере.",
                 )
                 return
             logger.info("Канал chat_id=%s: проверка прав OK (%s)", cid, reason_ch)
@@ -708,7 +728,8 @@ class MaxBot:
                 )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором чата с правом писать сообщения ",
+                    "Бот должен быть администратором чата с правом писать сообщения "
+                    "(или владельцем). Если доступы уже выданы — см. лог members/me на сервере.",
                 )
                 return
             logger.info("Чат комментариев chat_id=%s: проверка прав OK (%s)", ccid, reason_cc)
@@ -731,6 +752,8 @@ class MaxBot:
                 "comments_chat_link": invite_url,
                 "channel_title": draft.get("channel_title") or None,
                 "comments_chat_title": ch_title or None,
+                "chat_mute_enabled": False,
+                "quiet_hours": "",
             }
             self.config.channel_bindings.append(new_binding)
             self.config.save()
@@ -767,15 +790,39 @@ class MaxBot:
             return
 
         if state == AdminState.AWAITING_MUTE_RANGE:
+            mcid = self.mute_range_channel_id.get(sender_id)
+            if mcid is None:
+                self.admin_states[sender_id] = AdminState.NONE
+                await self.send_channels_submenu(sender_id)
+                return
             try:
-                self.config.quiet_hours = normalize_quiet_hours(text)
+                qh = normalize_quiet_hours(text)
             except ValueError:
                 await self.send_message(sender_id, "Формат: HH:MM-HH:MM, например 12:00-14:00 или 21:33-07:00")
                 return
+            updated = False
+            for b in self.config.channel_bindings:
+                if int(b["channel_id"]) == int(mcid):
+                    b["quiet_hours"] = qh
+                    updated = True
+                    break
+            if not updated:
+                self.mute_range_channel_id.pop(sender_id, None)
+                self.admin_states[sender_id] = AdminState.NONE
+                await self.send_message(sender_id, "Привязка канала не найдена.")
+                await self.send_channels_submenu(sender_id)
+                return
             self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
-            await self.send_message(sender_id, f"Диапазон Mute обновлен: {self.config.quiet_hours} (МСК)")
-            await self.send_chat_mute_submenu(sender_id)
+            self.mute_range_channel_id.pop(sender_id, None)
+            await self.send_message(sender_id, f"Диапазон Mute обновлен: {qh} (МСК)")
+            await self.send_chat_mute_submenu(sender_id, mcid)
+            return
+
+        self.admin_states[sender_id] = AdminState.NONE
+        self.channel_bind_draft.pop(sender_id, None)
+        self.mute_range_channel_id.pop(sender_id, None)
+        await self.send_admin_menu(sender_id)
 
     async def send_admin_menu(self, user_id: int) -> None:
         buttons = [
@@ -783,7 +830,6 @@ class MaxBot:
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
             [{"type": "callback", "text": "Кнопки в посте", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
-            [{"type": "callback", "text": "Mute чата", "payload": "admin_chat_mute_submenu"}],
         ]
         await self.send_message(user_id, "Админ-панель", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -826,7 +872,10 @@ class MaxBot:
         buttons: List[List[Dict]] = [[{"type": "callback", "text": "Добавить канал", "payload": "admin_add_channel_start"}]]
         for b in bindings:
             cid = int(b["channel_id"])
-            label = str(b.get("channel_title") or f"Канал {cid}")[:40]
+            label = str(b.get("channel_title") or f"Канал {cid}")[:35]
+            buttons.append(
+                [{"type": "callback", "text": f"Mute: {label}", "payload": f"admin_channel_mute:{cid}"}]
+            )
             buttons.append(
                 [{"type": "callback", "text": f"Удалить: {label}", "payload": f"admin_remove_channel:{cid}"}]
             )
@@ -846,17 +895,26 @@ class MaxBot:
         text = f"Админы\nДобавленные: {admins_text}"
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
-    async def send_chat_mute_submenu(self, user_id: int) -> None:
-        toggle_text = "Выключить Mute" if self.config.chat_mute_enabled else "Включить Mute"
+    async def send_chat_mute_submenu(self, user_id: int, channel_id: int) -> None:
+        b = self.config.binding_for_channel(channel_id)
+        if not b:
+            await self.send_message(user_id, "Канал не найден.")
+            await self.send_channels_submenu(user_id)
+            return
+        mute_en = bool(b.get("chat_mute_enabled"))
+        qh = str(b.get("quiet_hours") or "").strip()
+        title = str(b.get("channel_title") or f"Канал {channel_id}")[:50]
+        toggle_text = "Выключить Mute" if mute_en else "Включить Mute"
         buttons = [
-            [{"type": "callback", "text": toggle_text, "payload": "admin_toggle_chat_mute"}],
-            [{"type": "callback", "text": "Изменить диапазон", "payload": "admin_set_mute_range"}],
-            [{"type": "callback", "text": "Назад", "payload": "admin_menu"}],
+            [{"type": "callback", "text": toggle_text, "payload": f"admin_toggle_chat_mute:{channel_id}"}],
+            [{"type": "callback", "text": "Изменить диапазон", "payload": f"admin_set_mute_range:{channel_id}"}],
+            [{"type": "callback", "text": "Назад", "payload": "admin_channels_submenu"}],
         ]
-        current = self.config.quiet_hours or "не настроены"
+        current = qh or "не настроены"
         text = (
-            "Mute чата\n"
-            f"Статус: {'включен' if self.config.chat_mute_enabled else 'выключен'}\n"
+            f"Mute (чат комментариев к этому каналу)\n"
+            f"{title}\n"
+            f"Статус: {'включен' if mute_en else 'выключен'}\n"
             f"Диапазон: {current}\n"
             "Часовой пояс: Europe/Moscow (МСК)"
         )
@@ -904,8 +962,18 @@ class MaxBot:
             await self.send_channels_submenu(sender_id)
         elif payload == "admin_admins_submenu":
             await self.send_admins_submenu(sender_id)
-        elif payload == "admin_chat_mute_submenu":
-            await self.send_chat_mute_submenu(sender_id)
+        elif isinstance(payload, str) and payload.startswith("admin_channel_mute:"):
+            raw_id = payload.split(":", 1)[1]
+            try:
+                mc = int(raw_id)
+            except ValueError:
+                await self.send_message(sender_id, "Некорректный id канала.")
+                return
+            if not self.config.binding_for_channel(mc):
+                await self.send_message(sender_id, "Канал не найден.")
+                await self.send_channels_submenu(sender_id)
+                return
+            await self.send_chat_mute_submenu(sender_id, mc)
         elif payload == "admin_set_text":
             self.admin_states[sender_id] = AdminState.AWAITING_AD_TEXT
             await self.send_message(sender_id, "Введите новый текст рекламной кнопки:")
@@ -924,15 +992,35 @@ class MaxBot:
         elif payload == "admin_add_admin":
             self.admin_states[sender_id] = AdminState.AWAITING_NEW_ADMIN
             await self.send_message(sender_id, "Введите user_id нового админа:")
-        elif payload == "admin_toggle_chat_mute":
-            self.config.chat_mute_enabled = not self.config.chat_mute_enabled
+        elif isinstance(payload, str) and payload.startswith("admin_toggle_chat_mute:"):
+            raw_id = payload.split(":", 1)[1]
+            try:
+                tcid = int(raw_id)
+            except ValueError:
+                return
+            b = self.config.binding_for_channel(tcid)
+            if not b:
+                await self.send_message(sender_id, "Канал не найден.")
+                await self.send_channels_submenu(sender_id)
+                return
+            b["chat_mute_enabled"] = not bool(b.get("chat_mute_enabled"))
             self.config.save()
             await self.send_message(
                 sender_id,
-                f"Mute чата {'включен' if self.config.chat_mute_enabled else 'выключен'}",
+                f"Mute для этого канала {'включен' if b['chat_mute_enabled'] else 'выключен'}",
             )
-            await self.send_chat_mute_submenu(sender_id)
-        elif payload == "admin_set_mute_range":
+            await self.send_chat_mute_submenu(sender_id, tcid)
+        elif isinstance(payload, str) and payload.startswith("admin_set_mute_range:"):
+            raw_id = payload.split(":", 1)[1]
+            try:
+                mcid = int(raw_id)
+            except ValueError:
+                return
+            if not self.config.binding_for_channel(mcid):
+                await self.send_message(sender_id, "Канал не найден.")
+                await self.send_channels_submenu(sender_id)
+                return
+            self.mute_range_channel_id[sender_id] = mcid
             self.admin_states[sender_id] = AdminState.AWAITING_MUTE_RANGE
             await self.send_message(sender_id, "Введите диапазон, например 12:00-14:00 или 21:33-07:00")
         elif isinstance(payload, str) and payload.startswith("admin_remove_admin:"):
