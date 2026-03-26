@@ -171,18 +171,17 @@ def check_channel_admin_permissions(m: dict) -> tuple[bool, str]:
 
 
 def check_comments_chat_admin_permissions(m: dict) -> tuple[bool, str]:
-    """Чат комментариев: владелец; или write и удаление (delete_message и/или delete)."""
+    """Чат комментариев: владелец; или право писать (write)."""
     if m.get("is_owner"):
         return True, "owner"
     perms = set(m.get("permissions") or [])
-    can_delete = bool(perms & {"delete_message", "delete"})
-    if "write" in perms and can_delete:
-        return True, "write_and_delete"
+    if "write" in perms:
+        return True, "write"
     if m.get("is_admin") and not perms:
         return True, "admin_no_explicit_permissions"
     if m.get("is_admin"):
-        return False, f"admin_but_missing_write_or_delete permissions={sorted(perms)}"
-    return False, f"no_owner_or_write_delete is_admin={m.get('is_admin')} permissions={sorted(perms)}"
+        return False, f"admin_but_no_write permissions={sorted(perms)}"
+    return False, f"no_owner_or_write is_admin={m.get('is_admin')} permissions={sorted(perms)}"
 
 
 class Config:
@@ -657,8 +656,7 @@ class MaxBot:
                 )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором канала с правом редактировать сообщения "
-                    "(или владельцем). Если доступы уже выданы — пришлите фрагмент лога members/me из сервера.",
+                    "Бот должен быть администратором канала с правом редактировать сообщения ",
                 )
                 return
             logger.info("Канал chat_id=%s: проверка прав OK (%s)", cid, reason_ch)
@@ -678,8 +676,7 @@ class MaxBot:
             await self.send_message(
                 sender_id,
                 "Канал принят. Теперь отправьте ссылку-приглашение в чат комментариев "
-                "(или числовой chat_id чата). Бот должен быть администратором с правами "
-                "писать и удалять сообщения.",
+                "(или числовой chat_id чата). Бот должен быть администратором с правом писать в чат.",
             )
             return
 
@@ -711,8 +708,7 @@ class MaxBot:
                 )
                 await self.send_message(
                     sender_id,
-                    "Бот должен быть администратором чата с правами писать и удалять сообщения "
-                    "(или владельцем). Если доступы уже выданы — см. лог members/me на сервере.",
+                    "Бот должен быть администратором чата с правом писать сообщения ",
                 )
                 return
             logger.info("Чат комментариев chat_id=%s: проверка прав OK (%s)", ccid, reason_cc)
