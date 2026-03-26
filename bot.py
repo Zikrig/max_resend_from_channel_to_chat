@@ -156,11 +156,12 @@ def membership_summary(m: dict) -> str:
 
 
 def check_channel_admin_permissions(m: dict) -> tuple[bool, str]:
-    """Редактирование постов в канале: владелец; или явные edit_* в permissions; или админ без списка (все права)."""
+    """Редактирование постов в канале: владелец; или право редактировать (в API бывает edit или edit_message)."""
     if m.get("is_owner"):
         return True, "owner"
     perms = set(m.get("permissions") or [])
-    if perms & {"edit_message", "post_edit_delete_message"}:
+    # Документация: edit_message / post_edit_delete_message; на практике приходит короткое «edit»
+    if perms & {"edit", "edit_message", "post_edit_delete_message"}:
         return True, "explicit_edit_permission"
     if m.get("is_admin") and not perms:
         return True, "admin_no_explicit_permissions"
@@ -170,12 +171,13 @@ def check_channel_admin_permissions(m: dict) -> tuple[bool, str]:
 
 
 def check_comments_chat_admin_permissions(m: dict) -> tuple[bool, str]:
-    """Чат комментариев: владелец; или write+delete_message; или админ без списка."""
+    """Чат комментариев: владелец; или write и удаление (delete_message и/или delete)."""
     if m.get("is_owner"):
         return True, "owner"
     perms = set(m.get("permissions") or [])
-    if "write" in perms and "delete_message" in perms:
-        return True, "write_and_delete_message"
+    can_delete = bool(perms & {"delete_message", "delete"})
+    if "write" in perms and can_delete:
+        return True, "write_and_delete"
     if m.get("is_admin") and not perms:
         return True, "admin_no_explicit_permissions"
     if m.get("is_admin"):
