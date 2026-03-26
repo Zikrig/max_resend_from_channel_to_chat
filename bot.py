@@ -731,7 +731,7 @@ class MaxBot:
         buttons = [
             [{"type": "callback", "text": "Каналы", "payload": "admin_channels_submenu"}],
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
-            [{"type": "callback", "text": "Кнопки у поста в канале", "payload": "admin_chat_link_submenu"}],
+            [{"type": "callback", "text": "Кнопки в посте", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
             [{"type": "callback", "text": "Mute чата", "payload": "admin_chat_mute_submenu"}],
         ]
