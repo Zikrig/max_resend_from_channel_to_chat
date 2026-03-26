@@ -872,14 +872,34 @@ class MaxBot:
         buttons: List[List[Dict]] = [[{"type": "callback", "text": "Добавить канал", "payload": "admin_add_channel_start"}]]
         for b in bindings:
             cid = int(b["channel_id"])
-            label = str(b.get("channel_title") or f"Канал {cid}")[:35]
+            label = str(b.get("channel_title") or f"Канал {cid}")[:60]
             buttons.append(
-                [{"type": "callback", "text": f"Mute: {label}", "payload": f"admin_channel_mute:{cid}"}]
-            )
-            buttons.append(
-                [{"type": "callback", "text": f"Удалить: {label}", "payload": f"admin_remove_channel:{cid}"}]
+                [{"type": "callback", "text": label, "payload": f"admin_channel_detail:{cid}"}]
             )
         buttons.append([{"type": "callback", "text": "Назад", "payload": "admin_menu"}])
+        await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
+
+    async def send_channel_detail_submenu(self, user_id: int, channel_id: int) -> None:
+        b = self.config.binding_for_channel(channel_id)
+        if not b:
+            await self.send_message(user_id, "Канал не найден.")
+            await self.send_channels_submenu(user_id)
+            return
+        cid = int(b["channel_id"])
+        ccid = int(b["comments_chat_id"])
+        ct = b.get("channel_title") or f"id {cid}"
+        cct = b.get("comments_chat_title") or f"id {ccid}"
+        text = (
+            f"Канал: {ct}\n"
+            f"channel_id: {cid}\n\n"
+            f"Чат комментариев: {cct}\n"
+            f"comments_chat_id: {ccid}"
+        )
+        buttons = [
+            [{"type": "callback", "text": "Mute", "payload": f"admin_channel_mute:{cid}"}],
+            [{"type": "callback", "text": "Удалить", "payload": f"admin_remove_channel:{cid}"}],
+            [{"type": "callback", "text": "Назад", "payload": "admin_channels_submenu"}],
+        ]
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_admins_submenu(self, user_id: int) -> None:
@@ -908,7 +928,7 @@ class MaxBot:
         buttons = [
             [{"type": "callback", "text": toggle_text, "payload": f"admin_toggle_chat_mute:{channel_id}"}],
             [{"type": "callback", "text": "Изменить диапазон", "payload": f"admin_set_mute_range:{channel_id}"}],
-            [{"type": "callback", "text": "Назад", "payload": "admin_channels_submenu"}],
+            [{"type": "callback", "text": "Назад", "payload": f"admin_channel_detail:{channel_id}"}],
         ]
         current = qh or "не настроены"
         text = (
@@ -937,6 +957,14 @@ class MaxBot:
             await self.send_chat_link_submenu(sender_id)
         elif payload == "admin_channels_submenu":
             await self.send_channels_submenu(sender_id)
+        elif isinstance(payload, str) and payload.startswith("admin_channel_detail:"):
+            raw_id = payload.split(":", 1)[1]
+            try:
+                dcid = int(raw_id)
+            except ValueError:
+                await self.send_message(sender_id, "Некорректный id канала.")
+                return
+            await self.send_channel_detail_submenu(sender_id, dcid)
         elif payload == "admin_add_channel_start":
             self.channel_bind_draft.pop(sender_id, None)
             self.admin_states[sender_id] = AdminState.AWAITING_BIND_CHANNEL_INVITE
