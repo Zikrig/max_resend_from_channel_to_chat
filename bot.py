@@ -2,7 +2,7 @@
 MAX-бот:
 1. Добавляет кнопки к постам в канале и пересылает пост в чат комментариев (привязка канал→чат в /admin → «Каналы»).
 2. Реклама под постом в чате — одна на все каналы (текст и ссылка в /admin).
-3. Управляет кнопками и админами через /admin; мут — в Каналы → канал → Mute; список постов с кнопками — «Посты» (до 3 суток хранения).
+3. Управляет кнопками и админами через /admin; мут и посты с кнопками — в Каналы → канал (Посты только для выбранного канала, до 3 суток).
 """
 
 from __future__ import annotations
@@ -391,6 +391,11 @@ class Config:
     def sorted_tracked_posts(self) -> List[Dict[str, Any]]:
         self.prune_tracked_posts()
         return sorted(self.tracked_posts, key=lambda p: float(p.get("saved_at", 0)), reverse=True)
+
+    def sorted_tracked_posts_for_channel(self, channel_id: int) -> List[Dict[str, Any]]:
+        self.prune_tracked_posts()
+        sub = [p for p in self.tracked_posts if int(p["channel_id"]) == int(channel_id)]
+        return sorted(sub, key=lambda p: float(p.get("saved_at", 0)), reverse=True)
 
     def remove_tracked_posts_for_channel(self, channel_id: int) -> None:
         self.tracked_posts = [p for p in self.tracked_posts if int(p["channel_id"]) != int(channel_id)]
@@ -941,7 +946,7 @@ class MaxBot:
             ctx = self.post_edit_ref.get(sender_id)
             if not ctx:
                 self.admin_states[sender_id] = AdminState.NONE
-                await self.send_posts_list(sender_id, 0)
+                await self.send_channels_submenu(sender_id)
                 return
             cid = int(ctx["channel_id"])
             mid = str(ctx["message_id"])
@@ -968,21 +973,35 @@ class MaxBot:
     async def send_admin_menu(self, user_id: int) -> None:
         buttons = [
             [{"type": "callback", "text": "Каналы", "payload": "admin_channels_submenu"}],
-            [{"type": "callback", "text": "Посты", "payload": "admin_posts_page:0"}],
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
             [{"type": "callback", "text": "Кнопки в посте", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
         ]
         await self.send_message(user_id, "Админ-панель", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
-    async def send_posts_list(self, user_id: int, page: int) -> None:
-        posts = self.config.sorted_tracked_posts()
+    async def send_posts_list(self, user_id: int, channel_id: int, page: int) -> None:
+        b = self.config.binding_for_channel(channel_id)
+        if not b:
+            await self.send_message(user_id, "Канал не найден.")
+            await self.send_channels_submenu(user_id)
+            return
+        posts = self.config.sorted_tracked_posts_for_channel(channel_id)
         total = len(posts)
+        title = str(b.get("channel_title") or f"Канал {channel_id}")[:80]
         if total == 0:
             await self.send_message(
                 user_id,
-                "Пока нет сохранённых постов: бот ещё не добавлял к постам кнопки или для всех записей прошло больше 3 суток.",
-                [{"type": "inline_keyboard", "payload": {"buttons": [[{"type": "callback", "text": "Назад", "payload": "admin_menu"}]]}}],
+                f"Постов с кнопками для «{title}» пока нет (бот ещё не обрабатывал посты или записи старше 3 суток удалены).",
+                [
+                    {
+                        "type": "inline_keyboard",
+                        "payload": {
+                            "buttons": [
+                                [{"type": "callback", "text": "Назад", "payload": f"admin_channel_detail:{channel_id}"}]
+                            ]
+                        },
+                    }
+                ],
             )
             return
         page_size = POSTS_PAGE_SIZE
@@ -991,8 +1010,8 @@ class MaxBot:
         start = page * page_size
         chunk = posts[start : start + page_size]
         lines = [
-            f"Посты канала (новые сверху). Страница {page + 1} из {max_page + 1}.",
-            f"Всего в списке: {total}. Хранение до 3 суток (МСК по времени сохранения).",
+            f"Посты канала: {title}",
+            f"Новые сверху. Страница {page + 1} из {max_page + 1}. Всего: {total}. Хранение до 3 суток.",
         ]
         text = "\n".join(lines)
         buttons: List[List[Dict]] = []
@@ -1008,16 +1027,26 @@ class MaxBot:
             label = preview[:60]
             ref = encode_post_ref(cid, mid)
             buttons.append(
-                [{"type": "callback", "text": label, "payload": f"admin_post_detail:{ref}:{page}"}]
+                [
+                    {
+                        "type": "callback",
+                        "text": label,
+                        "payload": f"admin_post_detail:{ref}:{page}:{channel_id}",
+                    }
+                ]
             )
         nav: List[Dict] = []
         if page > 0:
-            nav.append({"type": "callback", "text": "←", "payload": f"admin_posts_page:{page - 1}"})
+            nav.append(
+                {"type": "callback", "text": "←", "payload": f"admin_channel_posts:{channel_id}:{page - 1}"}
+            )
         if page < max_page:
-            nav.append({"type": "callback", "text": "→", "payload": f"admin_posts_page:{page + 1}"})
+            nav.append(
+                {"type": "callback", "text": "→", "payload": f"admin_channel_posts:{channel_id}:{page + 1}"}
+            )
         if nav:
             buttons.append(nav)
-        buttons.append([{"type": "callback", "text": "Назад", "payload": "admin_menu"}])
+        buttons.append([{"type": "callback", "text": "Назад", "payload": f"admin_channel_detail:{channel_id}"}])
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_post_detail(self, user_id: int, channel_id: int, message_id: str, return_page: int) -> None:
@@ -1025,14 +1054,20 @@ class MaxBot:
         p = self.config.find_tracked_post(channel_id, message_id)
         if not p:
             await self.send_message(user_id, "Пост не найден или срок хранения истёк.")
-            await self.send_posts_list(user_id, return_page)
+            await self.send_posts_list(user_id, channel_id, return_page)
             return
         body = (p.get("text") or "").strip() or "(пустой текст)"
         ref = encode_post_ref(channel_id, message_id)
         msg_text = f"Текст поста:\n\n{body}"
         buttons = [
-            [{"type": "callback", "text": "Поменять текст", "payload": f"admin_post_edit:{ref}:{return_page}"}],
-            [{"type": "callback", "text": "Назад", "payload": f"admin_posts_page:{return_page}"}],
+            [
+                {
+                    "type": "callback",
+                    "text": "Поменять текст",
+                    "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}",
+                }
+            ],
+            [{"type": "callback", "text": "Назад", "payload": f"admin_channel_posts:{channel_id}:{return_page}"}],
         ]
         await self.send_message(user_id, msg_text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -1100,6 +1135,7 @@ class MaxBot:
         )
         buttons = [
             [{"type": "callback", "text": "Mute", "payload": f"admin_channel_mute:{cid}"}],
+            [{"type": "callback", "text": "Посты", "payload": f"admin_channel_posts:{cid}:0"}],
             [{"type": "callback", "text": "Удалить", "payload": f"admin_remove_channel:{cid}"}],
             [{"type": "callback", "text": "Назад", "payload": "admin_channels_submenu"}],
         ]
@@ -1160,48 +1196,62 @@ class MaxBot:
             await self.send_chat_link_submenu(sender_id)
         elif payload == "admin_channels_submenu":
             await self.send_channels_submenu(sender_id)
-        elif isinstance(payload, str) and payload.startswith("admin_posts_page:"):
-            raw_pg = payload.split(":", 1)[1]
-            try:
-                pg = int(raw_pg)
-            except ValueError:
-                pg = 0
-            await self.send_posts_list(sender_id, pg)
-        elif isinstance(payload, str) and payload.startswith("admin_post_detail:"):
-            rest = payload[len("admin_post_detail:") :]
-            parts = rest.rsplit(":", 1)
+        elif isinstance(payload, str) and payload.startswith("admin_channel_posts:"):
+            rest = payload[len("admin_channel_posts:") :]
+            parts = rest.split(":", 1)
             if len(parts) != 2:
                 return
-            ref, page_s = parts[0], parts[1]
+            try:
+                ch_id = int(parts[0])
+                pg = int(parts[1])
+            except ValueError:
+                return
+            await self.send_posts_list(sender_id, ch_id, pg)
+        elif isinstance(payload, str) and payload.startswith("admin_post_detail:"):
+            rest = payload[len("admin_post_detail:") :]
+            parts = rest.rsplit(":", 2)
+            if len(parts) != 3:
+                return
+            ref, page_s, ch_s = parts[0], parts[1], parts[2]
             try:
                 page = int(page_s)
+                list_ch = int(ch_s)
             except ValueError:
-                page = 0
+                return
             dec = decode_post_ref(ref)
             if not dec:
                 await self.send_message(sender_id, "Некорректная ссылка на пост.")
                 return
             cid, mid = dec
+            if int(cid) != int(list_ch):
+                await self.send_message(sender_id, "Несовпадение канала.")
+                await self.send_posts_list(sender_id, list_ch, page)
+                return
             await self.send_post_detail(sender_id, cid, mid, page)
         elif isinstance(payload, str) and payload.startswith("admin_post_edit:"):
             rest = payload[len("admin_post_edit:") :]
-            parts = rest.rsplit(":", 1)
-            if len(parts) != 2:
+            parts = rest.rsplit(":", 2)
+            if len(parts) != 3:
                 return
-            ref, page_s = parts[0], parts[1]
+            ref, page_s, ch_s = parts[0], parts[1], parts[2]
             try:
                 page = int(page_s)
+                list_ch = int(ch_s)
             except ValueError:
-                page = 0
+                return
             dec = decode_post_ref(ref)
             if not dec:
                 await self.send_message(sender_id, "Некорректная ссылка.")
                 return
             cid, mid = dec
+            if int(cid) != int(list_ch):
+                await self.send_message(sender_id, "Несовпадение канала.")
+                await self.send_posts_list(sender_id, list_ch, page)
+                return
             tr = self.config.find_tracked_post(cid, mid)
             if not tr:
                 await self.send_message(sender_id, "Пост не найден или срок хранения истёк.")
-                await self.send_posts_list(sender_id, page)
+                await self.send_posts_list(sender_id, cid, page)
                 return
             self.post_edit_ref[sender_id] = {
                 "channel_id": cid,
