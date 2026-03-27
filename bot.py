@@ -116,6 +116,24 @@ def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
         return None
 
 
+def clean_media_attachments_from_body(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Медиа и прочие вложения без клавиатуры (как при первой отправке в чат)."""
+    clean: List[Dict[str, Any]] = []
+    for item in attachments:
+        if item.get("type") == "inline_keyboard":
+            continue
+        payload = item.get("payload", {})
+        if not isinstance(payload, dict):
+            payload = {}
+        safe_payload = {
+            key: value
+            for key, value in payload.items()
+            if key not in ("callback_id", "url", "size", "width", "height", "duration")
+        }
+        clean.append({"type": item.get("type"), "payload": safe_payload})
+    return clean
+
+
 def is_time_in_range(now_value: dtime, range_value: str) -> bool:
     if not range_value:
         return False
@@ -334,6 +352,9 @@ class Config:
             if not isinstance(item, dict):
                 continue
             try:
+                ma = item.get("media_attachments")
+                if not isinstance(ma, list):
+                    ma = []
                 out.append(
                     {
                         "channel_id": int(item["channel_id"]),
@@ -341,6 +362,8 @@ class Config:
                         "text": str(item.get("text", "")),
                         "message_link": str(item.get("message_link", "")),
                         "saved_at": float(item.get("saved_at", 0)),
+                        "chat_message_id": str(item.get("chat_message_id", "") or ""),
+                        "media_attachments": ma,
                     }
                 )
             except (KeyError, TypeError, ValueError):
@@ -361,6 +384,9 @@ class Config:
         message_id: str,
         text: str,
         message_link: str,
+        *,
+        chat_message_id: str | None = None,
+        media_attachments: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.prune_tracked_posts()
         now = time.time()
@@ -370,6 +396,10 @@ class Config:
                 p["text"] = text
                 p["message_link"] = message_link
                 p["saved_at"] = now
+                if chat_message_id is not None:
+                    p["chat_message_id"] = chat_message_id
+                if media_attachments is not None:
+                    p["media_attachments"] = media_attachments
                 return
         self.tracked_posts.append(
             {
@@ -378,6 +408,8 @@ class Config:
                 "text": text,
                 "message_link": message_link,
                 "saved_at": now,
+                "chat_message_id": chat_message_id if chat_message_id is not None else "",
+                "media_attachments": list(media_attachments) if media_attachments is not None else [],
             }
         )
 
@@ -532,18 +564,38 @@ class MaxBot:
             return []
         return [{"type": "inline_keyboard", "payload": {"buttons": [channel_buttons_row]}}]
 
+    def build_comments_chat_copy_attachments(self, media_attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        copy_attachments = list(media_attachments)
+        ad_buttons = self.get_standard_buttons(include_ad=True)
+        if ad_buttons:
+            copy_attachments.append({"type": "inline_keyboard", "payload": {"buttons": ad_buttons}})
+        return copy_attachments
+
     async def apply_channel_post_text_edit(
         self,
         channel_id: int,
         message_id: str,
         new_text: str,
         message_link: str,
+        media_attachments: Optional[List[Dict[str, Any]]] = None,
+        chat_message_id: Optional[str] = None,
     ) -> bool:
         binding = self.config.binding_for_channel(channel_id)
         if not binding:
             return False
+        media = list(media_attachments or [])
         kb = self.build_channel_keyboard_attachment(binding, message_link)
-        return await self.edit_message(str(message_id), new_text, kb if kb else None)
+        channel_attachments = media + kb
+        if not await self.edit_message(str(message_id), new_text, channel_attachments):
+            return False
+        chat_mid = (chat_message_id or "").strip()
+        if not chat_mid:
+            return True
+        chat_copy = self.build_comments_chat_copy_attachments(media)
+        if not await self.edit_message(chat_mid, new_text, chat_copy):
+            logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
+            return False
+        return True
 
     async def fetch_chat_by_id(self, chat_id: int) -> Optional[Dict[str, Any]]:
         try:
@@ -690,32 +742,22 @@ class MaxBot:
         text = msg.get("body", {}).get("text") or ""
         attachments = msg.get("body", {}).get("attachments") or []
 
-        clean_attachments = []
-        for item in attachments:
-            if item.get("type") == "inline_keyboard":
-                continue
-            payload = item.get("payload", {})
-            safe_payload = {
-                key: value
-                for key, value in payload.items()
-                if key not in ("callback_id", "url", "size", "width", "height", "duration")
-            }
-            clean_attachments.append({"type": item.get("type"), "payload": safe_payload})
+        clean_attachments = clean_media_attachments_from_body(attachments)
 
         comments_chat_id = int(binding["comments_chat_id"])
-        comments_invite_link = str(binding.get("comments_chat_link", "")).strip()
 
+        chat_message_id = ""
         short_message_id = ""
         if comments_chat_id:
-            copy_attachments = list(clean_attachments)
-            ad_buttons = self.get_standard_buttons(include_ad=True)
-            if ad_buttons:
-                copy_attachments.append({"type": "inline_keyboard", "payload": {"buttons": ad_buttons}})
+            copy_attachments = self.build_comments_chat_copy_attachments(clean_attachments)
 
             forwarded = await self.send_message(comments_chat_id, text, copy_attachments)
             if forwarded:
                 body = forwarded.get("body", {})
                 short_message_id = get_short_id(body.get("seq")) or str(body.get("mid")).split(".")[-1]
+                raw_chat_mid = body.get("mid")
+                if raw_chat_mid is not None:
+                    chat_message_id = str(raw_chat_mid)
 
         message_link = ""
         if comments_chat_id and short_message_id:
@@ -733,6 +775,8 @@ class MaxBot:
                     str(message_id),
                     text,
                     message_link,
+                    chat_message_id=chat_message_id,
+                    media_attachments=clean_attachments,
                 )
                 self.config.save()
 
@@ -952,13 +996,21 @@ class MaxBot:
             mid = str(ctx["message_id"])
             page = int(ctx.get("return_page", 0))
             ml = str(ctx.get("message_link", ""))
-            ok = await self.apply_channel_post_text_edit(cid, mid, text, ml)
+            tr = self.config.find_tracked_post(cid, mid)
+            media = list(tr.get("media_attachments") or []) if tr else []
+            chat_mid = (tr.get("chat_message_id") or "").strip() if tr else ""
+            ok = await self.apply_channel_post_text_edit(
+                cid, mid, text, ml, media_attachments=media, chat_message_id=chat_mid or None
+            )
             if ok:
                 self.config.register_tracked_post(cid, mid, text, ml)
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
-                await self.send_message(sender_id, "Текст поста в канале обновлён.")
+                if chat_mid:
+                    await self.send_message(sender_id, "Текст обновлён в канале и в копии в чате комментариев.")
+                else:
+                    await self.send_message(sender_id, "Текст поста в канале обновлён.")
                 await self.send_post_detail(sender_id, cid, mid, page)
             else:
                 await self.send_message(sender_id, "Не удалось изменить пост (проверьте права бота и message_id).")
