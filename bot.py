@@ -596,14 +596,14 @@ class MaxBot:
             channel_buttons_row.append(
                 {"type": "link", "text": self.config.comments_chat_text, "url": comments_invite_link}
             )
-        # if message_link and (self.config.comments_message_button_text or "").strip():
-        #     channel_buttons_row.append(
-        #         {
-        #             "type": "link",
-        #             "text": self.config.comments_message_button_text.strip(),
-        #             "url": message_link,
-        #         }
-        #     )
+        if message_link and (self.config.comments_message_button_text or "").strip():
+            channel_buttons_row.append(
+                {
+                    "type": "link",
+                    "text": self.config.comments_message_button_text.strip(),
+                    "url": message_link,
+                }
+            )
 
         channel_attachments = list(clean_attachments)
         if channel_buttons_row:
