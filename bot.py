@@ -16,7 +16,7 @@ import re
 import struct
 import sys
 import time
-from datetime import datetime, time
+from datetime import datetime, time as dtime
 from enum import Enum
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
@@ -88,7 +88,7 @@ def get_short_id(seq: Any) -> str:
         return ""
 
 
-def parse_hhmm(value: str) -> time:
+def parse_hhmm(value: str) -> dtime:
     return datetime.strptime(value, "%H:%M").time()
 
 
@@ -116,7 +116,7 @@ def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
         return None
 
 
-def is_time_in_range(now_value: time, range_value: str) -> bool:
+def is_time_in_range(now_value: dtime, range_value: str) -> bool:
     if not range_value:
         return False
     start_raw, end_raw = range_value.split("-", 1)
