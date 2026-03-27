@@ -2,7 +2,7 @@
 MAX-бот:
 1. Добавляет кнопки к постам в канале и пересылает пост в чат комментариев (привязка канал→чат в /admin → «Каналы»).
 2. Реклама под постом в чате — одна на все каналы (текст и ссылка в /admin).
-3. Управляет кнопками и админами через /admin; мут чата комментариев — отдельно для каждого канала (Каналы → Mute).
+3. Управляет кнопками и админами через /admin; мут — в Каналы → канал → Mute; список постов с кнопками — «Посты» (до 3 суток хранения).
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ import os
 import re
 import struct
 import sys
+import time
 from datetime import datetime, time
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -24,6 +25,8 @@ import httpx
 
 API_BASE = "https://platform-api.max.ru"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
+TRACKED_POST_TTL_SEC = 3 * 24 * 3600
+POSTS_PAGE_SIZE = 10
 
 
 class MoscowFormatter(logging.Formatter):
@@ -53,6 +56,7 @@ class AdminState(Enum):
     AWAITING_BIND_COMMENTS_INVITE = "awaiting_bind_comments_invite"
     AWAITING_NEW_ADMIN = "awaiting_new_admin"
     AWAITING_MUTE_RANGE = "awaiting_mute_range"
+    AWAITING_POST_EDIT_TEXT = "awaiting_post_edit_text"
 
 
 def parse_admin_ids(raw: Any) -> List[int]:
@@ -96,6 +100,20 @@ def normalize_quiet_hours(value: str) -> str:
     start_time = parse_hhmm(start_raw)
     end_time = parse_hhmm(end_raw)
     return f"{start_time.strftime('%H:%M')}-{end_time.strftime('%H:%M')}"
+
+
+def encode_post_ref(channel_id: int, message_id: str) -> str:
+    raw = json.dumps({"c": channel_id, "m": str(message_id)}, separators=(",", ":")).encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
+    try:
+        pad = "=" * (-len(ref) % 4)
+        data = json.loads(base64.urlsafe_b64decode(ref + pad).decode())
+        return int(data["c"]), str(data["m"])
+    except Exception:
+        return None
 
 
 def is_time_in_range(now_value: time, range_value: str) -> bool:
@@ -196,6 +214,7 @@ class Config:
         self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
         self.admin_ids: List[int] = []
         self.channel_bindings: List[Dict[str, Any]] = []
+        self.tracked_posts: List[Dict[str, Any]] = []
 
         self.load()
         self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
@@ -221,6 +240,7 @@ class Config:
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
             self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
             self.channel_bindings = self._load_channel_bindings(data)
+            self.tracked_posts = self._load_tracked_posts(data)
             logger.info("Config loaded from file.")
         except Exception as e:
             logger.error("Failed to load config file: %s", e)
@@ -305,7 +325,78 @@ class Config:
     def all_comments_chat_ids(self) -> set[int]:
         return {int(b["comments_chat_id"]) for b in self.channel_bindings}
 
+    def _load_tracked_posts(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        raw = data.get("tracked_posts")
+        if not isinstance(raw, list):
+            return []
+        out: List[Dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                out.append(
+                    {
+                        "channel_id": int(item["channel_id"]),
+                        "message_id": str(item["message_id"]),
+                        "text": str(item.get("text", "")),
+                        "message_link": str(item.get("message_link", "")),
+                        "saved_at": float(item.get("saved_at", 0)),
+                    }
+                )
+            except (KeyError, TypeError, ValueError):
+                continue
+        self._prune_tracked_posts_list(out)
+        return out
+
+    def _prune_tracked_posts_list(self, posts: List[Dict[str, Any]]) -> None:
+        cutoff = time.time() - TRACKED_POST_TTL_SEC
+        posts[:] = [p for p in posts if float(p.get("saved_at", 0)) >= cutoff]
+
+    def prune_tracked_posts(self) -> None:
+        self._prune_tracked_posts_list(self.tracked_posts)
+
+    def register_tracked_post(
+        self,
+        channel_id: int,
+        message_id: str,
+        text: str,
+        message_link: str,
+    ) -> None:
+        self.prune_tracked_posts()
+        now = time.time()
+        mid = str(message_id)
+        for p in self.tracked_posts:
+            if int(p["channel_id"]) == int(channel_id) and str(p["message_id"]) == mid:
+                p["text"] = text
+                p["message_link"] = message_link
+                p["saved_at"] = now
+                return
+        self.tracked_posts.append(
+            {
+                "channel_id": int(channel_id),
+                "message_id": mid,
+                "text": text,
+                "message_link": message_link,
+                "saved_at": now,
+            }
+        )
+
+    def find_tracked_post(self, channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
+        mid = str(message_id)
+        for p in self.tracked_posts:
+            if int(p["channel_id"]) == int(channel_id) and str(p["message_id"]) == mid:
+                return p
+        return None
+
+    def sorted_tracked_posts(self) -> List[Dict[str, Any]]:
+        self.prune_tracked_posts()
+        return sorted(self.tracked_posts, key=lambda p: float(p.get("saved_at", 0)), reverse=True)
+
+    def remove_tracked_posts_for_channel(self, channel_id: int) -> None:
+        self.tracked_posts = [p for p in self.tracked_posts if int(p["channel_id"]) != int(channel_id)]
+
     def save(self) -> None:
+        self.prune_tracked_posts()
         try:
             with open(self.filename, "w", encoding="utf-8") as f:
                 json.dump(
@@ -316,6 +407,7 @@ class Config:
                         "comments_message_button_text": self.comments_message_button_text,
                         "channel_bindings": self.channel_bindings,
                         "admin_ids": self.admin_ids,
+                        "tracked_posts": self.tracked_posts,
                     },
                     f,
                     ensure_ascii=False,
@@ -336,6 +428,7 @@ class MaxBot:
         self.admin_states: Dict[int, AdminState] = {}
         self.channel_bind_draft: Dict[int, Dict[str, Any]] = {}
         self.mute_range_channel_id: Dict[int, int] = {}
+        self.post_edit_ref: Dict[int, Dict[str, Any]] = {}
 
     def is_admin(self, user_id: int | None) -> bool:
         return user_id is not None and (
@@ -414,6 +507,38 @@ class MaxBot:
         if include_ad and self.config.ad_text and self.config.ad_url:
             buttons.append([{"type": "link", "text": self.config.ad_text, "url": self.config.ad_url}])
         return buttons
+
+    def build_channel_keyboard_attachment(self, binding: Dict[str, Any], message_link: str) -> List[Dict]:
+        comments_invite_link = str(binding.get("comments_chat_link", "")).strip()
+        channel_buttons_row: List[Dict] = []
+        if comments_invite_link:
+            channel_buttons_row.append(
+                {"type": "link", "text": self.config.comments_chat_text, "url": comments_invite_link}
+            )
+        if message_link and (self.config.comments_message_button_text or "").strip():
+            channel_buttons_row.append(
+                {
+                    "type": "link",
+                    "text": self.config.comments_message_button_text.strip(),
+                    "url": message_link,
+                }
+            )
+        if not channel_buttons_row:
+            return []
+        return [{"type": "inline_keyboard", "payload": {"buttons": [channel_buttons_row]}}]
+
+    async def apply_channel_post_text_edit(
+        self,
+        channel_id: int,
+        message_id: str,
+        new_text: str,
+        message_link: str,
+    ) -> bool:
+        binding = self.config.binding_for_channel(channel_id)
+        if not binding:
+            return False
+        kb = self.build_channel_keyboard_attachment(binding, message_link)
+        return await self.edit_message(str(message_id), new_text, kb if kb else None)
 
     async def fetch_chat_by_id(self, chat_id: int) -> Optional[Dict[str, Any]]:
         try:
@@ -591,28 +716,20 @@ class MaxBot:
         if comments_chat_id and short_message_id:
             message_link = f"https://max.ru/c/{comments_chat_id}/{short_message_id}"
 
-        channel_buttons_row: List[Dict] = []
-        if comments_invite_link:
-            channel_buttons_row.append(
-                {"type": "link", "text": self.config.comments_chat_text, "url": comments_invite_link}
-            )
-        if message_link and (self.config.comments_message_button_text or "").strip():
-            channel_buttons_row.append(
-                {
-                    "type": "link",
-                    "text": self.config.comments_message_button_text.strip(),
-                    "url": message_link,
-                }
-            )
-
+        kb_att = self.build_channel_keyboard_attachment(binding, message_link)
         channel_attachments = list(clean_attachments)
-        if channel_buttons_row:
-            channel_attachments.append(
-                {"type": "inline_keyboard", "payload": {"buttons": [channel_buttons_row]}}
-            )
+        channel_attachments.extend(kb_att)
 
         if message_id:
-            await self.edit_message(message_id, text, channel_attachments)
+            ok = await self.edit_message(message_id, text, channel_attachments)
+            if ok and kb_att:
+                self.config.register_tracked_post(
+                    int(channel_id),
+                    str(message_id),
+                    text,
+                    message_link,
+                )
+                self.config.save()
 
     async def process_admin_message(self, msg: Dict[str, Any]) -> None:
         raw_sid = msg.get("sender", {}).get("user_id")
@@ -626,6 +743,7 @@ class MaxBot:
             self.admin_states[sender_id] = AdminState.NONE
             self.channel_bind_draft.pop(sender_id, None)
             self.mute_range_channel_id.pop(sender_id, None)
+            self.post_edit_ref.pop(sender_id, None)
             await self.send_admin_menu(sender_id)
             return
 
@@ -819,19 +937,104 @@ class MaxBot:
             await self.send_chat_mute_submenu(sender_id, mcid)
             return
 
+        if state == AdminState.AWAITING_POST_EDIT_TEXT:
+            ctx = self.post_edit_ref.get(sender_id)
+            if not ctx:
+                self.admin_states[sender_id] = AdminState.NONE
+                await self.send_posts_list(sender_id, 0)
+                return
+            cid = int(ctx["channel_id"])
+            mid = str(ctx["message_id"])
+            page = int(ctx.get("return_page", 0))
+            ml = str(ctx.get("message_link", ""))
+            ok = await self.apply_channel_post_text_edit(cid, mid, text, ml)
+            if ok:
+                self.config.register_tracked_post(cid, mid, text, ml)
+                self.config.save()
+                self.admin_states[sender_id] = AdminState.NONE
+                self.post_edit_ref.pop(sender_id, None)
+                await self.send_message(sender_id, "Текст поста в канале обновлён.")
+                await self.send_post_detail(sender_id, cid, mid, page)
+            else:
+                await self.send_message(sender_id, "Не удалось изменить пост (проверьте права бота и message_id).")
+            return
+
         self.admin_states[sender_id] = AdminState.NONE
         self.channel_bind_draft.pop(sender_id, None)
         self.mute_range_channel_id.pop(sender_id, None)
+        self.post_edit_ref.pop(sender_id, None)
         await self.send_admin_menu(sender_id)
 
     async def send_admin_menu(self, user_id: int) -> None:
         buttons = [
             [{"type": "callback", "text": "Каналы", "payload": "admin_channels_submenu"}],
+            [{"type": "callback", "text": "Посты", "payload": "admin_posts_page:0"}],
             [{"type": "callback", "text": "Рекламная ссылка", "payload": "admin_ad_submenu"}],
             [{"type": "callback", "text": "Кнопки в посте", "payload": "admin_chat_link_submenu"}],
             [{"type": "callback", "text": "Админы", "payload": "admin_admins_submenu"}],
         ]
         await self.send_message(user_id, "Админ-панель", [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
+
+    async def send_posts_list(self, user_id: int, page: int) -> None:
+        posts = self.config.sorted_tracked_posts()
+        total = len(posts)
+        if total == 0:
+            await self.send_message(
+                user_id,
+                "Пока нет сохранённых постов: бот ещё не добавлял к постам кнопки или для всех записей прошло больше 3 суток.",
+                [{"type": "inline_keyboard", "payload": {"buttons": [[{"type": "callback", "text": "Назад", "payload": "admin_menu"}]]}}],
+            )
+            return
+        page_size = POSTS_PAGE_SIZE
+        max_page = max(0, (total - 1) // page_size)
+        page = max(0, min(page, max_page))
+        start = page * page_size
+        chunk = posts[start : start + page_size]
+        lines = [
+            f"Посты канала (новые сверху). Страница {page + 1} из {max_page + 1}.",
+            f"Всего в списке: {total}. Хранение до 3 суток (МСК по времени сохранения).",
+        ]
+        text = "\n".join(lines)
+        buttons: List[List[Dict]] = []
+        for p in chunk:
+            cid = int(p["channel_id"])
+            mid = str(p["message_id"])
+            raw_txt = p.get("text") or ""
+            preview = raw_txt.replace("\n", " ").strip()[:55]
+            if len(raw_txt) > 55:
+                preview += "…"
+            if not preview:
+                preview = f"…{mid[-12:]}"
+            label = preview[:60]
+            ref = encode_post_ref(cid, mid)
+            buttons.append(
+                [{"type": "callback", "text": label, "payload": f"admin_post_detail:{ref}:{page}"}]
+            )
+        nav: List[Dict] = []
+        if page > 0:
+            nav.append({"type": "callback", "text": "←", "payload": f"admin_posts_page:{page - 1}"})
+        if page < max_page:
+            nav.append({"type": "callback", "text": "→", "payload": f"admin_posts_page:{page + 1}"})
+        if nav:
+            buttons.append(nav)
+        buttons.append([{"type": "callback", "text": "Назад", "payload": "admin_menu"}])
+        await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
+
+    async def send_post_detail(self, user_id: int, channel_id: int, message_id: str, return_page: int) -> None:
+        self.config.prune_tracked_posts()
+        p = self.config.find_tracked_post(channel_id, message_id)
+        if not p:
+            await self.send_message(user_id, "Пост не найден или срок хранения истёк.")
+            await self.send_posts_list(user_id, return_page)
+            return
+        body = (p.get("text") or "").strip() or "(пустой текст)"
+        ref = encode_post_ref(channel_id, message_id)
+        msg_text = f"Текст поста:\n\n{body}"
+        buttons = [
+            [{"type": "callback", "text": "Поменять текст", "payload": f"admin_post_edit:{ref}:{return_page}"}],
+            [{"type": "callback", "text": "Назад", "payload": f"admin_posts_page:{return_page}"}],
+        ]
+        await self.send_message(user_id, msg_text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
     async def send_ad_submenu(self, user_id: int) -> None:
         buttons = [
@@ -957,6 +1160,57 @@ class MaxBot:
             await self.send_chat_link_submenu(sender_id)
         elif payload == "admin_channels_submenu":
             await self.send_channels_submenu(sender_id)
+        elif isinstance(payload, str) and payload.startswith("admin_posts_page:"):
+            raw_pg = payload.split(":", 1)[1]
+            try:
+                pg = int(raw_pg)
+            except ValueError:
+                pg = 0
+            await self.send_posts_list(sender_id, pg)
+        elif isinstance(payload, str) and payload.startswith("admin_post_detail:"):
+            rest = payload[len("admin_post_detail:") :]
+            parts = rest.rsplit(":", 1)
+            if len(parts) != 2:
+                return
+            ref, page_s = parts[0], parts[1]
+            try:
+                page = int(page_s)
+            except ValueError:
+                page = 0
+            dec = decode_post_ref(ref)
+            if not dec:
+                await self.send_message(sender_id, "Некорректная ссылка на пост.")
+                return
+            cid, mid = dec
+            await self.send_post_detail(sender_id, cid, mid, page)
+        elif isinstance(payload, str) and payload.startswith("admin_post_edit:"):
+            rest = payload[len("admin_post_edit:") :]
+            parts = rest.rsplit(":", 1)
+            if len(parts) != 2:
+                return
+            ref, page_s = parts[0], parts[1]
+            try:
+                page = int(page_s)
+            except ValueError:
+                page = 0
+            dec = decode_post_ref(ref)
+            if not dec:
+                await self.send_message(sender_id, "Некорректная ссылка.")
+                return
+            cid, mid = dec
+            tr = self.config.find_tracked_post(cid, mid)
+            if not tr:
+                await self.send_message(sender_id, "Пост не найден или срок хранения истёк.")
+                await self.send_posts_list(sender_id, page)
+                return
+            self.post_edit_ref[sender_id] = {
+                "channel_id": cid,
+                "message_id": mid,
+                "message_link": str(tr.get("message_link", "")),
+                "return_page": page,
+            }
+            self.admin_states[sender_id] = AdminState.AWAITING_POST_EDIT_TEXT
+            await self.send_message(sender_id, "Введите новый текст поста в канале (одним сообщением):")
         elif isinstance(payload, str) and payload.startswith("admin_channel_detail:"):
             raw_id = payload.split(":", 1)[1]
             try:
@@ -985,6 +1239,7 @@ class MaxBot:
             if len(self.config.channel_bindings) == before:
                 await self.send_message(sender_id, "Такой привязки не найдено.")
             else:
+                self.config.remove_tracked_posts_for_channel(remove_cid)
                 self.config.save()
                 await self.send_message(sender_id, "Привязка канала удалена.")
             await self.send_channels_submenu(sender_id)
