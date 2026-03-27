@@ -1163,21 +1163,16 @@ class MaxBot:
         ref = encode_post_ref(channel_id, message_id)
         msg_text = f"Текст поста:\n\n{body}"
         buttons = [
-            [
-                {
-                    "type": "callback",
-                    "text": "Поменять текст",
-                    "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}",
-                },
-                {
-                    "type": "callback",
-                    "text": "Поменять картинку",
-                    "payload": f"admin_post_edit_image:{ref}:{return_page}:{channel_id}",
-                },
-            ],
+            [{"type": "callback", "text": "Поменять текст", "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}"}],
+            [{"type": "callback", "text": "Поменять картинку", "payload": f"admin_post_edit_image:{ref}:{return_page}:{channel_id}"}],
             [{"type": "callback", "text": "Назад", "payload": f"admin_channel_posts:{channel_id}:{return_page}"}],
         ]
-        await self.send_message(user_id, msg_text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
+        kb = {"type": "inline_keyboard", "payload": {"buttons": buttons}}
+        media = list(p.get("media_attachments") or [])
+        if media:
+            await self.send_message(user_id, msg_text, media + [kb])
+        else:
+            await self.send_message(user_id, msg_text, [kb])
 
     async def send_ad_submenu(self, user_id: int) -> None:
         buttons = [
