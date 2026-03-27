@@ -57,6 +57,7 @@ class AdminState(Enum):
     AWAITING_NEW_ADMIN = "awaiting_new_admin"
     AWAITING_MUTE_RANGE = "awaiting_mute_range"
     AWAITING_POST_EDIT_TEXT = "awaiting_post_edit_text"
+    AWAITING_POST_EDIT_IMAGE = "awaiting_post_edit_image"
 
 
 def parse_admin_ids(raw: Any) -> List[int]:
@@ -116,8 +117,15 @@ def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
         return None
 
 
-def clean_media_attachments_from_body(attachments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Медиа и прочие вложения без клавиатуры (как при первой отправке в чат)."""
+def clean_media_attachments_from_body(
+    attachments: List[Dict[str, Any]], *, strip_ref_fields: bool = True
+) -> List[Dict[str, Any]]:
+    """Медиа и прочие вложения без клавиатуры.
+
+    strip_ref_fields: для постов из канала убираем часть полей payload (как при пересылке в чат).
+    Для нового фото из лички админа (смена картинки) передаём strip_ref_fields=False, чтобы не терять url/token.
+    """
+    drop = ("callback_id", "url", "size", "width", "height", "duration")
     clean: List[Dict[str, Any]] = []
     for item in attachments:
         if item.get("type") == "inline_keyboard":
@@ -125,11 +133,10 @@ def clean_media_attachments_from_body(attachments: List[Dict[str, Any]]) -> List
         payload = item.get("payload", {})
         if not isinstance(payload, dict):
             payload = {}
-        safe_payload = {
-            key: value
-            for key, value in payload.items()
-            if key not in ("callback_id", "url", "size", "width", "height", "duration")
-        }
+        if strip_ref_fields:
+            safe_payload = {key: value for key, value in payload.items() if key not in drop}
+        else:
+            safe_payload = {key: value for key, value in payload.items() if key != "callback_id"}
         clean.append({"type": item.get("type"), "payload": safe_payload})
     return clean
 
@@ -986,6 +993,50 @@ class MaxBot:
             await self.send_chat_mute_submenu(sender_id, mcid)
             return
 
+        if state == AdminState.AWAITING_POST_EDIT_IMAGE:
+            ctx = self.post_edit_ref.get(sender_id)
+            if not ctx:
+                self.admin_states[sender_id] = AdminState.NONE
+                await self.send_channels_submenu(sender_id)
+                return
+            cid = int(ctx["channel_id"])
+            mid = str(ctx["message_id"])
+            page = int(ctx.get("return_page", 0))
+            ml = str(ctx.get("message_link", ""))
+            raw_attachments = msg.get("body", {}).get("attachments") or []
+            new_media = clean_media_attachments_from_body(raw_attachments, strip_ref_fields=False)
+            if not new_media:
+                await self.send_message(
+                    sender_id,
+                    "В сообщении нет вложения с картинкой. Отправьте фото или изображение одним сообщением.",
+                )
+                return
+            tr = self.config.find_tracked_post(cid, mid)
+            if not tr:
+                self.admin_states[sender_id] = AdminState.NONE
+                self.post_edit_ref.pop(sender_id, None)
+                await self.send_message(sender_id, "Пост не найден или срок хранения истёк.")
+                await self.send_posts_list(sender_id, cid, page)
+                return
+            post_text = str(tr.get("text") or "")
+            chat_mid = (tr.get("chat_message_id") or "").strip()
+            ok = await self.apply_channel_post_text_edit(
+                cid, mid, post_text, ml, media_attachments=new_media, chat_message_id=chat_mid or None
+            )
+            if ok:
+                self.config.register_tracked_post(cid, mid, post_text, ml, media_attachments=new_media)
+                self.config.save()
+                self.admin_states[sender_id] = AdminState.NONE
+                self.post_edit_ref.pop(sender_id, None)
+                if chat_mid:
+                    await self.send_message(sender_id, "Картинка обновлена в канале и в копии в чате комментариев.")
+                else:
+                    await self.send_message(sender_id, "Картинка в канале обновлена.")
+                await self.send_post_detail(sender_id, cid, mid, page)
+            else:
+                await self.send_message(sender_id, "Не удалось обновить вложения (проверьте права бота и формат файла).")
+            return
+
         if state == AdminState.AWAITING_POST_EDIT_TEXT:
             ctx = self.post_edit_ref.get(sender_id)
             if not ctx:
@@ -1117,7 +1168,12 @@ class MaxBot:
                     "type": "callback",
                     "text": "Поменять текст",
                     "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}",
-                }
+                },
+                {
+                    "type": "callback",
+                    "text": "Поменять картинку",
+                    "payload": f"admin_post_edit_image:{ref}:{return_page}:{channel_id}",
+                },
             ],
             [{"type": "callback", "text": "Назад", "payload": f"admin_channel_posts:{channel_id}:{return_page}"}],
         ]
@@ -1313,6 +1369,42 @@ class MaxBot:
             }
             self.admin_states[sender_id] = AdminState.AWAITING_POST_EDIT_TEXT
             await self.send_message(sender_id, "Введите новый текст поста в канале (одним сообщением):")
+        elif isinstance(payload, str) and payload.startswith("admin_post_edit_image:"):
+            rest = payload[len("admin_post_edit_image:") :]
+            parts = rest.rsplit(":", 2)
+            if len(parts) != 3:
+                return
+            ref, page_s, ch_s = parts[0], parts[1], parts[2]
+            try:
+                page = int(page_s)
+                list_ch = int(ch_s)
+            except ValueError:
+                return
+            dec = decode_post_ref(ref)
+            if not dec:
+                await self.send_message(sender_id, "Некорректная ссылка.")
+                return
+            cid, mid = dec
+            if int(cid) != int(list_ch):
+                await self.send_message(sender_id, "Несовпадение канала.")
+                await self.send_posts_list(sender_id, list_ch, page)
+                return
+            tr = self.config.find_tracked_post(cid, mid)
+            if not tr:
+                await self.send_message(sender_id, "Пост не найден или срок хранения истёк.")
+                await self.send_posts_list(sender_id, cid, page)
+                return
+            self.post_edit_ref[sender_id] = {
+                "channel_id": cid,
+                "message_id": mid,
+                "message_link": str(tr.get("message_link", "")),
+                "return_page": page,
+            }
+            self.admin_states[sender_id] = AdminState.AWAITING_POST_EDIT_IMAGE
+            await self.send_message(
+                sender_id,
+                "Отправьте одно сообщение с новой картинкой (фото или файл изображения). Текст поста не меняется.",
+            )
         elif isinstance(payload, str) and payload.startswith("admin_channel_detail:"):
             raw_id = payload.split(":", 1)[1]
             try:
