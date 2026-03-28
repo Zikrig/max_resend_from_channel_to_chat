@@ -118,14 +118,45 @@ def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
 
 
 def normalize_text_format(raw: Any) -> Optional[str]:
-    """Допустимые значения NewMessageBody.format: markdown | html (см. dev.max.ru docs-api)."""
+    """Значение для NewMessageBody.format: markdown | html. Остальное → None (plain)."""
     if raw is None:
         return None
-    s = str(raw).strip().lower()
-    if s in ("markdown", "md"):
+    if isinstance(raw, dict):
+        inner = raw.get("type") or raw.get("name") or raw.get("value") or raw.get("format")
+        if inner is not None:
+            return normalize_text_format(inner)
+        return None
+    if isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return None
+    s = str(raw).strip().lower().replace("-", "_")
+    if s in ("markdown", "md", "mrkdwn"):
         return "markdown"
-    if s == "html":
+    if s in ("html", "text_html"):
         return "html"
+    if s in ("plain", "plaintext", "text", "none", "plain_text"):
+        return None
+    return None
+
+
+def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
+    """Ищем разметку во всех типичных полях: в ответе API имя/место может не совпадать с докой."""
+    for key in (
+        "format",
+        "text_format",
+        "textFormat",
+        "parse_mode",
+        "parseMode",
+        "text_style",
+        "textStyle",
+        "markup",
+    ):
+        if key not in body:
+            continue
+        fmt = normalize_text_format(body.get(key))
+        if fmt:
+            return fmt
     return None
 
 
@@ -134,7 +165,47 @@ def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[st
     text = body.get("text") or ""
     if not isinstance(text, str):
         text = str(text)
-    return text, normalize_text_format(body.get("format"))
+    return text, extract_text_format_from_body(body)
+
+
+def format_debug_snapshot(body: Dict[str, Any]) -> Dict[str, Any]:
+    """Поля body, которые могут относиться к разметке (для логов)."""
+    out: Dict[str, Any] = {}
+    if not isinstance(body, dict):
+        return out
+    for k in sorted(body.keys()):
+        low = k.lower()
+        if any(
+            s in low
+            for s in ("format", "markup", "parse", "entity", "element", "block", "style", "markdown", "html")
+        ):
+            v = body[k]
+            if k == "text" and isinstance(v, str) and len(v) > 180:
+                v = v[:180] + "…"
+            out[k] = v
+    return out
+
+
+def log_channel_post_body_from_api(msg: Dict[str, Any], channel_id: int) -> None:
+    """
+    Фактический webhook message.body по посту канала.
+    Документацию MAX нельзя считать исчерпывающей — смотрим, что реально приходит.
+    """
+    body = msg.get("body")
+    if not isinstance(body, dict):
+        logger.info(
+            "MAX channel_post chat_id=%s: body отсутствует или не dict (type=%s)",
+            channel_id,
+            type(body).__name__,
+        )
+        return
+    snap = format_debug_snapshot(body)
+    logger.info(
+        "MAX channel_post chat_id=%s: ключи message.body=%s | снимок полей про разметку: %s",
+        channel_id,
+        sorted(body.keys()),
+        json.dumps(snap, ensure_ascii=False, default=str),
+    )
 
 
 def clean_media_attachments_from_body(
@@ -383,6 +454,8 @@ class Config:
                 if not isinstance(ma, list):
                     ma = []
                 tf = normalize_text_format(item.get("text_format"))
+                if tf is None:
+                    tf = normalize_text_format(item.get("format"))
                 row: Dict[str, Any] = {
                     "channel_id": int(item["channel_id"]),
                     "message_id": str(item["message_id"]),
@@ -558,6 +631,8 @@ class MaxBot:
         text: str,
         attachments: Optional[List[Dict]] = None,
         text_format: Optional[str] = None,
+        *,
+        log_api_response_as: Optional[str] = None,
     ) -> bool:
         try:
             payload: Dict[str, Any] = {"text": text}
@@ -569,6 +644,26 @@ class MaxBot:
             if r.status_code != 200:
                 logger.error("Edit failed: %s %s", r.status_code, r.text)
             r.raise_for_status()
+            if log_api_response_as:
+                try:
+                    j = r.json()
+                    m = j.get("message") if isinstance(j, dict) else None
+                    b = m.get("body") if isinstance(m, dict) else None
+                    if isinstance(b, dict):
+                        logger.info(
+                            "%s: ответ PUT /messages — ключи message.body=%s | разметка: %s",
+                            log_api_response_as,
+                            sorted(b.keys()),
+                            json.dumps(format_debug_snapshot(b), ensure_ascii=False, default=str),
+                        )
+                    else:
+                        logger.info(
+                            "%s: ответ PUT /messages без message.body (keys=%s)",
+                            log_api_response_as,
+                            sorted(j.keys()) if isinstance(j, dict) else type(j).__name__,
+                        )
+                except Exception as ex:
+                    logger.info("%s: не разобрали JSON ответа edit: %s", log_api_response_as, ex)
             return True
         except Exception as e:
             logger.error("Failed to edit message %s: %s", message_id, e)
@@ -634,14 +729,24 @@ class MaxBot:
         kb = self.build_channel_keyboard_attachment(binding, message_link)
         channel_attachments = media + kb
         if not await self.edit_message(
-            str(message_id), new_text, channel_attachments, text_format=text_format
+            str(message_id),
+            new_text,
+            channel_attachments,
+            text_format=text_format,
+            log_api_response_as="apply_channel_post_text_edit channel",
         ):
             return False
         chat_mid = (chat_message_id or "").strip()
         if not chat_mid:
             return True
         chat_copy = self.build_comments_chat_copy_attachments(media)
-        if not await self.edit_message(chat_mid, new_text, chat_copy, text_format=text_format):
+        if not await self.edit_message(
+            chat_mid,
+            new_text,
+            chat_copy,
+            text_format=text_format,
+            log_api_response_as="apply_channel_post_text_edit comments_chat",
+        ):
             logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
             return False
         return True
@@ -791,7 +896,13 @@ class MaxBot:
         msg_body = msg.get("body") or {}
         if not isinstance(msg_body, dict):
             msg_body = {}
+        log_channel_post_body_from_api(msg, channel_id)
         text, text_fmt = message_body_text_and_format(msg_body)
+        logger.info(
+            "MAX channel_post chat_id=%s: после разбора body — text_format для API=%r (если None, в PUT уйдёт только text)",
+            channel_id,
+            text_fmt,
+        )
         attachments = msg_body.get("attachments") or []
 
         clean_attachments = clean_media_attachments_from_body(attachments)
@@ -808,6 +919,12 @@ class MaxBot:
             )
             if forwarded:
                 body = forwarded.get("body", {})
+                if isinstance(body, dict):
+                    logger.info(
+                        "MAX channel_post: ответ POST /messages (копия в чат) ключи body=%s | разметка: %s",
+                        sorted(body.keys()),
+                        json.dumps(format_debug_snapshot(body), ensure_ascii=False, default=str),
+                    )
                 short_message_id = get_short_id(body.get("seq")) or str(body.get("mid")).split(".")[-1]
                 raw_chat_mid = body.get("mid")
                 if raw_chat_mid is not None:
@@ -822,7 +939,13 @@ class MaxBot:
         channel_attachments.extend(kb_att)
 
         if message_id:
-            ok = await self.edit_message(message_id, text, channel_attachments, text_format=text_fmt)
+            ok = await self.edit_message(
+                message_id,
+                text,
+                channel_attachments,
+                text_format=text_fmt,
+                log_api_response_as=f"process_channel_post channel mid={message_id}",
+            )
             if ok and kb_att:
                 self.config.register_tracked_post(
                     int(channel_id),
@@ -1079,7 +1202,9 @@ class MaxBot:
                 text_format=tf,
             )
             if ok:
-                self.config.register_tracked_post(cid, mid, post_text, ml, media_attachments=new_media)
+                self.config.register_tracked_post(
+                    cid, mid, post_text, ml, media_attachments=new_media, text_format=tf
+                )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
@@ -1108,7 +1233,7 @@ class MaxBot:
             admin_body = msg.get("body") or {}
             if not isinstance(admin_body, dict):
                 admin_body = {}
-            fmt_from_admin = normalize_text_format(admin_body.get("format"))
+            fmt_from_admin = extract_text_format_from_body(admin_body)
             text_format = fmt_from_admin if fmt_from_admin else (
                 normalize_text_format(tr.get("text_format")) if tr else None
             )
