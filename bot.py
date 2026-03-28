@@ -141,7 +141,7 @@ def normalize_text_format(raw: Any) -> Optional[str]:
 
 
 def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
-    """Ищем разметку во всех типичных полях: в ответе API имя/место может не совпадать с докой."""
+    """Ищем enum format (markdown/html). Поле markup здесь не смотрим — это массив span-ов, см. copy_markup_from_body."""
     for key in (
         "format",
         "text_format",
@@ -150,7 +150,6 @@ def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
         "parseMode",
         "text_style",
         "textStyle",
-        "markup",
     ):
         if key not in body:
             continue
@@ -160,12 +159,67 @@ def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def copy_markup_from_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
+    """
+    Реальный MAX: в канале приходит body.markup = [{\"from\", \"length\", \"type\"}, ...], без format.
+    Копируем как есть для PUT/POST (документация может не совпадать с полем).
+    """
+    raw = body.get("markup")
+    if not isinstance(raw, list) or not raw:
+        return None
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            logger.warning("copy_markup_from_body: пропуск элемента не-dict: %r", item)
+            continue
+        out.append(dict(item))
+    return out or None
+
+
+def markup_from_admin_body(body: Dict[str, Any]) -> Any:
+    """
+    None — поля markup в сообщении админа нет (берём разметку из трекера).
+    list — явное значение, в т.ч. [] (сброс разметки в API).
+    """
+    if "markup" not in body:
+        return None
+    raw = body.get("markup")
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        return None
+    out: List[Dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            return None
+        out.append(dict(item))
+    return out
+
+
 def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[str]]:
-    """Текст и разметка из body входящего сообщения."""
+    """Текст и format (markdown/html) из body входящего сообщения."""
     text = body.get("text") or ""
     if not isinstance(text, str):
         text = str(text)
     return text, extract_text_format_from_body(body)
+
+
+def message_body_text_format_markup(
+    body: Dict[str, Any],
+) -> tuple[str, Optional[str], Optional[List[Dict[str, Any]]]]:
+    """Текст, format и массив markup (entity spans), как в webhook канала."""
+    text, tf = message_body_text_and_format(body)
+    return text, tf, copy_markup_from_body(body)
+
+
+def tracked_markup_for_api(tr: Optional[Dict[str, Any]]) -> Optional[List[Dict[str, Any]]]:
+    """Сохранённый в трекере markup для PUT/POST. None — поля не было (ключ не передаём)."""
+    if not tr or "markup" not in tr:
+        return None
+    m = tr.get("markup")
+    if not isinstance(m, list):
+        return None
+    return [dict(x) for x in m if isinstance(x, dict)]
 
 
 def format_debug_snapshot(body: Dict[str, Any]) -> Dict[str, Any]:
@@ -467,6 +521,9 @@ class Config:
                 }
                 if tf in ("markdown", "html"):
                     row["text_format"] = tf
+                mk = item.get("markup")
+                if isinstance(mk, list):
+                    row["markup"] = [dict(x) for x in mk if isinstance(x, dict)]
                 out.append(row)
             except (KeyError, TypeError, ValueError):
                 continue
@@ -490,6 +547,7 @@ class Config:
         chat_message_id: str | None = None,
         media_attachments: Optional[List[Dict[str, Any]]] = None,
         text_format: Optional[str] = None,
+        markup: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.prune_tracked_posts()
         now = time.time()
@@ -503,6 +561,14 @@ class Config:
             else:
                 p.pop("text_format", None)
 
+        def apply_markup_field(p: Dict[str, Any]) -> None:
+            if markup is None:
+                return
+            if markup:
+                p["markup"] = [dict(x) for x in markup]
+            else:
+                p.pop("markup", None)
+
         for p in self.tracked_posts:
             if int(p["channel_id"]) == int(channel_id) and str(p["message_id"]) == mid:
                 p["text"] = text
@@ -513,6 +579,7 @@ class Config:
                 if media_attachments is not None:
                     p["media_attachments"] = media_attachments
                 apply_text_format(p)
+                apply_markup_field(p)
                 return
         entry: Dict[str, Any] = {
             "channel_id": int(channel_id),
@@ -524,6 +591,7 @@ class Config:
             "media_attachments": list(media_attachments) if media_attachments is not None else [],
         }
         apply_text_format(entry)
+        apply_markup_field(entry)
         self.tracked_posts.append(entry)
 
     def find_tracked_post(self, channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
@@ -610,11 +678,14 @@ class MaxBot:
         text: str,
         attachments: Optional[List[Dict]] = None,
         text_format: Optional[str] = None,
+        markup: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict]:
         try:
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
+            if markup is not None:
+                payload["markup"] = markup
             if attachments:
                 payload["attachments"] = attachments
             params = {"user_id": chat_id} if chat_id > 0 else {"chat_id": chat_id}
@@ -631,6 +702,7 @@ class MaxBot:
         text: str,
         attachments: Optional[List[Dict]] = None,
         text_format: Optional[str] = None,
+        markup: Optional[List[Dict[str, Any]]] = None,
         *,
         log_api_response_as: Optional[str] = None,
     ) -> bool:
@@ -638,6 +710,8 @@ class MaxBot:
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
+            if markup is not None:
+                payload["markup"] = markup
             if attachments is not None:
                 payload["attachments"] = attachments
             r = await self.client.put("/messages", params={"message_id": message_id}, json=payload)
@@ -721,6 +795,7 @@ class MaxBot:
         media_attachments: Optional[List[Dict[str, Any]]] = None,
         chat_message_id: Optional[str] = None,
         text_format: Optional[str] = None,
+        markup: Optional[List[Dict[str, Any]]] = None,
     ) -> bool:
         binding = self.config.binding_for_channel(channel_id)
         if not binding:
@@ -733,6 +808,7 @@ class MaxBot:
             new_text,
             channel_attachments,
             text_format=text_format,
+            markup=markup,
             log_api_response_as="apply_channel_post_text_edit channel",
         ):
             return False
@@ -745,6 +821,7 @@ class MaxBot:
             new_text,
             chat_copy,
             text_format=text_format,
+            markup=markup,
             log_api_response_as="apply_channel_post_text_edit comments_chat",
         ):
             logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
@@ -897,11 +974,12 @@ class MaxBot:
         if not isinstance(msg_body, dict):
             msg_body = {}
         log_channel_post_body_from_api(msg, channel_id)
-        text, text_fmt = message_body_text_and_format(msg_body)
+        text, text_fmt, markup_spans = message_body_text_format_markup(msg_body)
         logger.info(
-            "MAX channel_post chat_id=%s: после разбора body — text_format для API=%r (если None, в PUT уйдёт только text)",
+            "MAX channel_post chat_id=%s: text_format=%r, markup spans=%s (entity-массив body.markup передаём в POST/PUT)",
             channel_id,
             text_fmt,
+            len(markup_spans) if markup_spans else 0,
         )
         attachments = msg_body.get("attachments") or []
 
@@ -915,7 +993,11 @@ class MaxBot:
             copy_attachments = self.build_comments_chat_copy_attachments(clean_attachments)
 
             forwarded = await self.send_message(
-                comments_chat_id, text, copy_attachments, text_format=text_fmt
+                comments_chat_id,
+                text,
+                copy_attachments,
+                text_format=text_fmt,
+                markup=markup_spans,
             )
             if forwarded:
                 body = forwarded.get("body", {})
@@ -944,6 +1026,7 @@ class MaxBot:
                 text,
                 channel_attachments,
                 text_format=text_fmt,
+                markup=markup_spans,
                 log_api_response_as=f"process_channel_post channel mid={message_id}",
             )
             if ok and kb_att:
@@ -955,6 +1038,7 @@ class MaxBot:
                     chat_message_id=chat_message_id,
                     media_attachments=clean_attachments,
                     text_format=text_fmt,
+                    markup=markup_spans,
                 )
                 self.config.save()
 
@@ -1192,6 +1276,7 @@ class MaxBot:
             post_text = str(tr.get("text") or "")
             chat_mid = (tr.get("chat_message_id") or "").strip()
             tf = normalize_text_format(tr.get("text_format"))
+            mu = tracked_markup_for_api(tr)
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
@@ -1200,11 +1285,10 @@ class MaxBot:
                 media_attachments=new_media,
                 chat_message_id=chat_mid or None,
                 text_format=tf,
+                markup=mu,
             )
             if ok:
-                self.config.register_tracked_post(
-                    cid, mid, post_text, ml, media_attachments=new_media, text_format=tf
-                )
+                self.config.register_tracked_post(cid, mid, post_text, ml, media_attachments=new_media, text_format=tf)
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
@@ -1237,6 +1321,8 @@ class MaxBot:
             text_format = fmt_from_admin if fmt_from_admin else (
                 normalize_text_format(tr.get("text_format")) if tr else None
             )
+            mu_ad = markup_from_admin_body(admin_body)
+            markup_for_edit = mu_ad if mu_ad is not None else tracked_markup_for_api(tr)
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
@@ -1245,9 +1331,17 @@ class MaxBot:
                 media_attachments=media,
                 chat_message_id=chat_mid or None,
                 text_format=text_format,
+                markup=markup_for_edit,
             )
             if ok:
-                self.config.register_tracked_post(cid, mid, text, ml, text_format=text_format)
+                self.config.register_tracked_post(
+                    cid,
+                    mid,
+                    text,
+                    ml,
+                    text_format=text_format,
+                    markup=mu_ad if mu_ad is not None else None,
+                )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
@@ -1363,10 +1457,13 @@ class MaxBot:
         kb = {"type": "inline_keyboard", "payload": {"buttons": buttons}}
         media = list(p.get("media_attachments") or [])
         preview_fmt = normalize_text_format(p.get("text_format"))
+        preview_mu = tracked_markup_for_api(p)
         if media:
-            await self.send_message(user_id, msg_text, media + [kb], text_format=preview_fmt)
+            await self.send_message(
+                user_id, msg_text, media + [kb], text_format=preview_fmt, markup=preview_mu
+            )
         else:
-            await self.send_message(user_id, msg_text, [kb], text_format=preview_fmt)
+            await self.send_message(user_id, msg_text, [kb], text_format=preview_fmt, markup=preview_mu)
 
     async def send_ad_submenu(self, user_id: int) -> None:
         buttons = [
