@@ -117,6 +117,26 @@ def decode_post_ref(ref: str) -> Optional[tuple[int, str]]:
         return None
 
 
+def normalize_text_format(raw: Any) -> Optional[str]:
+    """Допустимые значения NewMessageBody.format: markdown | html (см. dev.max.ru docs-api)."""
+    if raw is None:
+        return None
+    s = str(raw).strip().lower()
+    if s in ("markdown", "md"):
+        return "markdown"
+    if s == "html":
+        return "html"
+    return None
+
+
+def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[str]]:
+    """Текст и разметка из body входящего сообщения."""
+    text = body.get("text") or ""
+    if not isinstance(text, str):
+        text = str(text)
+    return text, normalize_text_format(body.get("format"))
+
+
 def clean_media_attachments_from_body(
     attachments: List[Dict[str, Any]], *, strip_ref_fields: bool = True
 ) -> List[Dict[str, Any]]:
@@ -362,17 +382,19 @@ class Config:
                 ma = item.get("media_attachments")
                 if not isinstance(ma, list):
                     ma = []
-                out.append(
-                    {
-                        "channel_id": int(item["channel_id"]),
-                        "message_id": str(item["message_id"]),
-                        "text": str(item.get("text", "")),
-                        "message_link": str(item.get("message_link", "")),
-                        "saved_at": float(item.get("saved_at", 0)),
-                        "chat_message_id": str(item.get("chat_message_id", "") or ""),
-                        "media_attachments": ma,
-                    }
-                )
+                tf = normalize_text_format(item.get("text_format"))
+                row: Dict[str, Any] = {
+                    "channel_id": int(item["channel_id"]),
+                    "message_id": str(item["message_id"]),
+                    "text": str(item.get("text", "")),
+                    "message_link": str(item.get("message_link", "")),
+                    "saved_at": float(item.get("saved_at", 0)),
+                    "chat_message_id": str(item.get("chat_message_id", "") or ""),
+                    "media_attachments": ma,
+                }
+                if tf in ("markdown", "html"):
+                    row["text_format"] = tf
+                out.append(row)
             except (KeyError, TypeError, ValueError):
                 continue
         self._prune_tracked_posts_list(out)
@@ -394,10 +416,20 @@ class Config:
         *,
         chat_message_id: str | None = None,
         media_attachments: Optional[List[Dict[str, Any]]] = None,
+        text_format: Optional[str] = None,
     ) -> None:
         self.prune_tracked_posts()
         now = time.time()
         mid = str(message_id)
+
+        def apply_text_format(p: Dict[str, Any]) -> None:
+            if text_format is None:
+                return
+            if text_format in ("markdown", "html"):
+                p["text_format"] = text_format
+            else:
+                p.pop("text_format", None)
+
         for p in self.tracked_posts:
             if int(p["channel_id"]) == int(channel_id) and str(p["message_id"]) == mid:
                 p["text"] = text
@@ -407,18 +439,19 @@ class Config:
                     p["chat_message_id"] = chat_message_id
                 if media_attachments is not None:
                     p["media_attachments"] = media_attachments
+                apply_text_format(p)
                 return
-        self.tracked_posts.append(
-            {
-                "channel_id": int(channel_id),
-                "message_id": mid,
-                "text": text,
-                "message_link": message_link,
-                "saved_at": now,
-                "chat_message_id": chat_message_id if chat_message_id is not None else "",
-                "media_attachments": list(media_attachments) if media_attachments is not None else [],
-            }
-        )
+        entry: Dict[str, Any] = {
+            "channel_id": int(channel_id),
+            "message_id": mid,
+            "text": text,
+            "message_link": message_link,
+            "saved_at": now,
+            "chat_message_id": chat_message_id if chat_message_id is not None else "",
+            "media_attachments": list(media_attachments) if media_attachments is not None else [],
+        }
+        apply_text_format(entry)
+        self.tracked_posts.append(entry)
 
     def find_tracked_post(self, channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
         mid = str(message_id)
@@ -503,9 +536,12 @@ class MaxBot:
         chat_id: int,
         text: str,
         attachments: Optional[List[Dict]] = None,
+        text_format: Optional[str] = None,
     ) -> Optional[Dict]:
         try:
-            payload = {"text": text}
+            payload: Dict[str, Any] = {"text": text}
+            if text_format in ("markdown", "html"):
+                payload["format"] = text_format
             if attachments:
                 payload["attachments"] = attachments
             params = {"user_id": chat_id} if chat_id > 0 else {"chat_id": chat_id}
@@ -521,9 +557,12 @@ class MaxBot:
         message_id: str,
         text: str,
         attachments: Optional[List[Dict]] = None,
+        text_format: Optional[str] = None,
     ) -> bool:
         try:
-            payload = {"text": text}
+            payload: Dict[str, Any] = {"text": text}
+            if text_format in ("markdown", "html"):
+                payload["format"] = text_format
             if attachments is not None:
                 payload["attachments"] = attachments
             r = await self.client.put("/messages", params={"message_id": message_id}, json=payload)
@@ -586,6 +625,7 @@ class MaxBot:
         message_link: str,
         media_attachments: Optional[List[Dict[str, Any]]] = None,
         chat_message_id: Optional[str] = None,
+        text_format: Optional[str] = None,
     ) -> bool:
         binding = self.config.binding_for_channel(channel_id)
         if not binding:
@@ -593,13 +633,15 @@ class MaxBot:
         media = list(media_attachments or [])
         kb = self.build_channel_keyboard_attachment(binding, message_link)
         channel_attachments = media + kb
-        if not await self.edit_message(str(message_id), new_text, channel_attachments):
+        if not await self.edit_message(
+            str(message_id), new_text, channel_attachments, text_format=text_format
+        ):
             return False
         chat_mid = (chat_message_id or "").strip()
         if not chat_mid:
             return True
         chat_copy = self.build_comments_chat_copy_attachments(media)
-        if not await self.edit_message(chat_mid, new_text, chat_copy):
+        if not await self.edit_message(chat_mid, new_text, chat_copy, text_format=text_format):
             logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
             return False
         return True
@@ -746,8 +788,11 @@ class MaxBot:
             logger.warning("No channel binding for chat_id=%s", channel_id)
             return
 
-        text = msg.get("body", {}).get("text") or ""
-        attachments = msg.get("body", {}).get("attachments") or []
+        msg_body = msg.get("body") or {}
+        if not isinstance(msg_body, dict):
+            msg_body = {}
+        text, text_fmt = message_body_text_and_format(msg_body)
+        attachments = msg_body.get("attachments") or []
 
         clean_attachments = clean_media_attachments_from_body(attachments)
 
@@ -758,7 +803,9 @@ class MaxBot:
         if comments_chat_id:
             copy_attachments = self.build_comments_chat_copy_attachments(clean_attachments)
 
-            forwarded = await self.send_message(comments_chat_id, text, copy_attachments)
+            forwarded = await self.send_message(
+                comments_chat_id, text, copy_attachments, text_format=text_fmt
+            )
             if forwarded:
                 body = forwarded.get("body", {})
                 short_message_id = get_short_id(body.get("seq")) or str(body.get("mid")).split(".")[-1]
@@ -775,7 +822,7 @@ class MaxBot:
         channel_attachments.extend(kb_att)
 
         if message_id:
-            ok = await self.edit_message(message_id, text, channel_attachments)
+            ok = await self.edit_message(message_id, text, channel_attachments, text_format=text_fmt)
             if ok and kb_att:
                 self.config.register_tracked_post(
                     int(channel_id),
@@ -784,6 +831,7 @@ class MaxBot:
                     message_link,
                     chat_message_id=chat_message_id,
                     media_attachments=clean_attachments,
+                    text_format=text_fmt,
                 )
                 self.config.save()
 
@@ -1020,8 +1068,15 @@ class MaxBot:
                 return
             post_text = str(tr.get("text") or "")
             chat_mid = (tr.get("chat_message_id") or "").strip()
+            tf = normalize_text_format(tr.get("text_format"))
             ok = await self.apply_channel_post_text_edit(
-                cid, mid, post_text, ml, media_attachments=new_media, chat_message_id=chat_mid or None
+                cid,
+                mid,
+                post_text,
+                ml,
+                media_attachments=new_media,
+                chat_message_id=chat_mid or None,
+                text_format=tf,
             )
             if ok:
                 self.config.register_tracked_post(cid, mid, post_text, ml, media_attachments=new_media)
@@ -1050,11 +1105,24 @@ class MaxBot:
             tr = self.config.find_tracked_post(cid, mid)
             media = list(tr.get("media_attachments") or []) if tr else []
             chat_mid = (tr.get("chat_message_id") or "").strip() if tr else ""
+            admin_body = msg.get("body") or {}
+            if not isinstance(admin_body, dict):
+                admin_body = {}
+            fmt_from_admin = normalize_text_format(admin_body.get("format"))
+            text_format = fmt_from_admin if fmt_from_admin else (
+                normalize_text_format(tr.get("text_format")) if tr else None
+            )
             ok = await self.apply_channel_post_text_edit(
-                cid, mid, text, ml, media_attachments=media, chat_message_id=chat_mid or None
+                cid,
+                mid,
+                text,
+                ml,
+                media_attachments=media,
+                chat_message_id=chat_mid or None,
+                text_format=text_format,
             )
             if ok:
-                self.config.register_tracked_post(cid, mid, text, ml)
+                self.config.register_tracked_post(cid, mid, text, ml, text_format=text_format)
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
@@ -1169,10 +1237,11 @@ class MaxBot:
         ]
         kb = {"type": "inline_keyboard", "payload": {"buttons": buttons}}
         media = list(p.get("media_attachments") or [])
+        preview_fmt = normalize_text_format(p.get("text_format"))
         if media:
-            await self.send_message(user_id, msg_text, media + [kb])
+            await self.send_message(user_id, msg_text, media + [kb], text_format=preview_fmt)
         else:
-            await self.send_message(user_id, msg_text, [kb])
+            await self.send_message(user_id, msg_text, [kb], text_format=preview_fmt)
 
     async def send_ad_submenu(self, user_id: int) -> None:
         buttons = [
