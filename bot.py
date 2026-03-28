@@ -159,10 +159,101 @@ def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Типы из webhook канала → обёртки по гайду MAX (format=markdown)
+_MARKUP_TYPE_TO_MARKDOWN: Dict[str, tuple[str, str]] = {
+    "emphasized": ("*", "*"),
+    "emphasis": ("*", "*"),
+    "em": ("*", "*"),
+    "italic": ("*", "*"),
+    "strong": ("**", "**"),
+    "bold": ("**", "**"),
+    "strikethrough": ("~~", "~~"),
+    "underline": ("++", "++"),
+    "code": ("`", "`"),
+    "monospace": ("`", "`"),
+}
+
+
+def _markdown_pair_for_span_type(typ: str) -> Optional[tuple[str, str]]:
+    return _MARKUP_TYPE_TO_MARKDOWN.get((typ or "").strip().lower())
+
+
+def apply_markup_spans_as_markdown(text: str, markup: List[Dict[str, Any]]) -> str:
+    """
+    В исходящих POST/PUT поле body.markup сервер фактически не применяет (ответ без markup).
+    Официально бот шлёт разметку через format=markdown и символы * ` ++ и т.д.
+    """
+    if not text or not markup:
+        return text
+    spans: List[tuple[int, int, str]] = []
+    for s in markup:
+        if not isinstance(s, dict):
+            continue
+        try:
+            start = int(s["from"])
+            ln = int(s["length"])
+            typ = str(s.get("type", ""))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ln <= 0 or start < 0:
+            continue
+        if start >= len(text):
+            logger.warning(
+                "apply_markup_spans_as_markdown: span from=%s за пределами текста len=%s (возможны индексы в UTF-16 — разметка не применена)",
+                start,
+                len(text),
+            )
+            continue
+        spans.append((start, min(ln, len(text) - start), typ))
+    if not spans:
+        return text
+    # Справа налево по индексу, чтобы смещения не ломались; при одном from — сначала более короткий (внутренний)
+    spans.sort(key=lambda x: (-x[0], x[1]))
+    out = text
+    for start, ln, typ in spans:
+        end = start + ln
+        if end > len(out):
+            end = len(out)
+        pair = _markdown_pair_for_span_type(typ)
+        if not pair:
+            logger.warning("apply_markup_spans_as_markdown: неизвестный type=%r, фрагмент пропущен", typ)
+            continue
+        left, right = pair
+        chunk = out[start:end]
+        out = out[:start] + left + chunk + right + out[end:]
+    return out
+
+
+def normalize_outbound_message(
+    text: str,
+    text_format: Optional[str],
+    markup: Optional[List[Dict[str, Any]]],
+) -> tuple[str, Optional[str], Optional[List[Dict[str, Any]]]]:
+    """
+    Готовим text/format/markup для API.
+    Span-markup из канала конвертируем в format=markdown + символы в тексте.
+    Если конвертация не меняет текст (индексы/type не сошлись), не шлём пустой markdown:
+    оставляем исходный массив markup в JSON — иначе клиент теряет выделение при PUT с клавиатурой.
+    """
+    if text_format in ("markdown", "html"):
+        return text, text_format, markup
+    if markup:
+        md = apply_markup_spans_as_markdown(text, markup)
+        if md != text:
+            return md, "markdown", None
+        logger.warning(
+            "normalize_outbound_message: span→markdown не изменил текст (len=%s); "
+            "в запросе передаём массив markup без format (как fallback)",
+            len(text or ""),
+        )
+        return text, None, markup
+    return text, None, None
+
+
 def copy_markup_from_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """
     Реальный MAX: в канале приходит body.markup = [{\"from\", \"length\", \"type\"}, ...], без format.
-    Копируем как есть для PUT/POST (документация может не совпадать с полем).
+    Храним копию для повторной конвертации при PUT; в API уходит уже markdown через normalize_outbound_message.
     """
     raw = body.get("markup")
     if not isinstance(raw, list) or not raw:
@@ -681,6 +772,7 @@ class MaxBot:
         markup: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[Dict]:
         try:
+            text, text_format, markup = normalize_outbound_message(text, text_format, markup)
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
@@ -707,6 +799,7 @@ class MaxBot:
         log_api_response_as: Optional[str] = None,
     ) -> bool:
         try:
+            text, text_format, markup = normalize_outbound_message(text, text_format, markup)
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
@@ -975,11 +1068,13 @@ class MaxBot:
             msg_body = {}
         log_channel_post_body_from_api(msg, channel_id)
         text, text_fmt, markup_spans = message_body_text_format_markup(msg_body)
+        api_preview = normalize_outbound_message(text, text_fmt, markup_spans)
         logger.info(
-            "MAX channel_post chat_id=%s: text_format=%r, markup spans=%s (entity-массив body.markup передаём в POST/PUT)",
+            "MAX channel_post chat_id=%s: входной text_format=%r, spans=%s → в API format=%r (span→markdown, массив markup не шлём)",
             channel_id,
             text_fmt,
             len(markup_spans) if markup_spans else 0,
+            api_preview[1],
         )
         attachments = msg_body.get("attachments") or []
 
@@ -1322,7 +1417,13 @@ class MaxBot:
                 normalize_text_format(tr.get("text_format")) if tr else None
             )
             mu_ad = markup_from_admin_body(admin_body)
-            markup_for_edit = mu_ad if mu_ad is not None else tracked_markup_for_api(tr)
+            prev_plain = str(tr.get("text") or "") if tr else ""
+            if mu_ad is not None:
+                markup_for_edit = mu_ad
+            elif text == prev_plain:
+                markup_for_edit = tracked_markup_for_api(tr)
+            else:
+                markup_for_edit = None
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
@@ -1334,13 +1435,19 @@ class MaxBot:
                 markup=markup_for_edit,
             )
             if ok:
+                if mu_ad is not None:
+                    reg_markup = mu_ad
+                elif text == prev_plain:
+                    reg_markup = None
+                else:
+                    reg_markup = []
                 self.config.register_tracked_post(
                     cid,
                     mid,
                     text,
                     ml,
                     text_format=text_format,
-                    markup=mu_ad if mu_ad is not None else None,
+                    markup=reg_markup,
                 )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
