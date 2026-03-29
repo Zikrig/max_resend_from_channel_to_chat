@@ -493,6 +493,14 @@ def log_channel_post_body_from_api(msg: Dict[str, Any], channel_id: int) -> None
         sorted(body.keys()),
         json.dumps(snap, ensure_ascii=False, default=str),
     )
+    raw_mu = body.get("markup")
+    empty_markup = not isinstance(raw_mu, list) or len(raw_mu) == 0
+    if empty_markup:
+        logger.info(
+            "MAX channel_post chat_id=%s: полный message.body (markup пустой — весь text и остальные поля):\n%s",
+            channel_id,
+            json_for_log(body),
+        )
 
 
 def clean_media_attachments_from_body(
