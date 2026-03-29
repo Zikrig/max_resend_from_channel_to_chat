@@ -3,10 +3,12 @@ FROM python:3.12-slim
 WORKDIR /app
 
 ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_DEFAULT_TIMEOUT=120
 
 COPY requirements.txt .
-RUN pip install -r requirements.txt
+# Медленный/нестабильный доступ к pypi.org — дольше ждём и больше ретраев
+RUN pip install --timeout 120 --retries 10 -r requirements.txt
 
 COPY bot.py .
 
