@@ -253,7 +253,8 @@ def normalize_outbound_message(
     Если конвертация не меняет текст — fallback: исходный text + массив markup.
     """
     if text_format in ("markdown", "html"):
-        return text, text_format, markup
+        # Пустой [] не передаём в API как ключ markup (см. edit_message) — иначе ломается markdown.
+        return text, text_format, markup if markup else None
     if markup:
         md = apply_markup_spans_as_markdown(text, markup)
         if md != text:
@@ -284,16 +285,18 @@ def copy_markup_from_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]
     return out or None
 
 
-def markup_from_admin_body(body: Dict[str, Any]) -> Any:
+def markup_from_admin_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """
-    None — поля markup в сообщении админа нет (берём разметку из трекера).
-    list — явное значение, в т.ч. [] (сброс разметки в API).
+    None — нет span-разметки в сообщении (ключ markup отсутствует, null или пустой []).
+    Клиент MAX часто шлёт markup: [] даже без явного «сброса» — это не то же самое, что
+    явный сброс на сервере; не [] возвращаем, чтобы дальше брать трекер / не слать markup: [] в PUT.
+    Non-empty list — реальные spans от клиента.
     """
     if "markup" not in body:
         return None
     raw = body.get("markup")
-    if raw is None:
-        return []
+    if raw is None or raw == []:
+        return None
     if not isinstance(raw, list):
         return None
     out: List[Dict[str, Any]] = []
@@ -301,7 +304,7 @@ def markup_from_admin_body(body: Dict[str, Any]) -> Any:
         if not isinstance(item, dict):
             return None
         out.append(dict(item))
-    return out
+    return out or None
 
 
 def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -816,7 +819,7 @@ class MaxBot:
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
-            if markup is not None:
+            if markup:
                 payload["markup"] = markup
             if attachments:
                 payload["attachments"] = attachments
@@ -844,7 +847,8 @@ class MaxBot:
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
-            if markup is not None:
+            # Пустой массив в JSON часто ломает отображение markdown; не шлём ключ, если spans нет.
+            if markup:
                 payload["markup"] = markup
             if attachments is not None:
                 payload["attachments"] = attachments
@@ -1505,9 +1509,9 @@ class MaxBot:
                 "markup_for_edit=%s prev_plain_len=%s text_len=%s text==prev_plain=%s channel_id=%s message_id=%s",
                 fmt_from_admin,
                 text_format,
-                "нет ключа"
+                "нет spans (ключ пустой/отсутствует)"
                 if mu_ad is None
-                else (f"{len(mu_ad)} span(s)" if mu_ad else "[] (сброс)"),
+                else f"{len(mu_ad)} span(s)",
                 "None"
                 if markup_for_edit is None
                 else (f"{len(markup_for_edit)} span(s)" if markup_for_edit else "[]"),
