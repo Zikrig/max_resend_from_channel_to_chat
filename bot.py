@@ -1068,13 +1068,13 @@ class MaxBot:
             msg_body = {}
         log_channel_post_body_from_api(msg, channel_id)
         text, text_fmt, markup_spans = message_body_text_format_markup(msg_body)
-        api_preview = normalize_outbound_message(text, text_fmt, markup_spans)
+        canon_text, canon_tf, canon_mk = normalize_outbound_message(text, text_fmt, markup_spans)
         logger.info(
-            "MAX channel_post chat_id=%s: входной text_format=%r, spans=%s → в API format=%r (span→markdown, массив markup не шлём)",
+            "MAX channel_post chat_id=%s: входной text_format=%r, spans=%s → канонический format=%r (для трекера и API)",
             channel_id,
             text_fmt,
             len(markup_spans) if markup_spans else 0,
-            api_preview[1],
+            canon_tf,
         )
         attachments = msg_body.get("attachments") or []
 
@@ -1089,10 +1089,10 @@ class MaxBot:
 
             forwarded = await self.send_message(
                 comments_chat_id,
-                text,
+                canon_text,
                 copy_attachments,
-                text_format=text_fmt,
-                markup=markup_spans,
+                text_format=canon_tf,
+                markup=canon_mk,
             )
             if forwarded:
                 body = forwarded.get("body", {})
@@ -1118,22 +1118,22 @@ class MaxBot:
         if message_id:
             ok = await self.edit_message(
                 message_id,
-                text,
+                canon_text,
                 channel_attachments,
-                text_format=text_fmt,
-                markup=markup_spans,
+                text_format=canon_tf,
+                markup=canon_mk,
                 log_api_response_as=f"process_channel_post channel mid={message_id}",
             )
             if ok and kb_att:
                 self.config.register_tracked_post(
                     int(channel_id),
                     str(message_id),
-                    text,
+                    canon_text,
                     message_link,
                     chat_message_id=chat_message_id,
                     media_attachments=clean_attachments,
-                    text_format=text_fmt,
-                    markup=markup_spans,
+                    text_format=canon_tf if canon_tf is not None else "",
+                    markup=canon_mk if canon_mk is not None else [],
                 )
                 self.config.save()
 
@@ -1417,7 +1417,7 @@ class MaxBot:
                 normalize_text_format(tr.get("text_format")) if tr else None
             )
             mu_ad = markup_from_admin_body(admin_body)
-            prev_plain = str(tr.get("text") or "") if tr else ""
+            prev_plain = (str(tr.get("text") or "").strip()) if tr else ""
             if mu_ad is not None:
                 markup_for_edit = mu_ad
             elif text == prev_plain:
@@ -1435,19 +1435,17 @@ class MaxBot:
                 markup=markup_for_edit,
             )
             if ok:
-                if mu_ad is not None:
-                    reg_markup = mu_ad
-                elif text == prev_plain:
-                    reg_markup = None
-                else:
-                    reg_markup = []
+                reg_t, reg_tf, reg_mk = normalize_outbound_message(
+                    text, text_format, markup_for_edit
+                )
                 self.config.register_tracked_post(
                     cid,
                     mid,
-                    text,
+                    reg_t,
                     ml,
-                    text_format=text_format,
-                    markup=reg_markup,
+                    media_attachments=media,
+                    text_format=reg_tf if reg_tf is not None else "",
+                    markup=reg_mk if reg_mk is not None else [],
                 )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
