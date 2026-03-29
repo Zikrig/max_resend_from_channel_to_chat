@@ -1,6 +1,16 @@
 services:
   max-forward-bot:
-    build: .
+    build:
+      context: .
+      # Linux VPS: сеть хоста при сборке. Docker Desktop Win/Mac — удалите network: host.
+      network: host
+      args:
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+        # Прокси на хосте: при network: host у сборки — часто достаточно HTTPS_PROXY=http://127.0.0.1:8888
+        # Иначе с bridge: http://172.17.0.1:8888 (tinyproxy должен слушать этот интерфейс и Allow подсеть Docker)
+        HTTP_PROXY: ${HTTP_PROXY:-}
+        HTTPS_PROXY: ${HTTPS_PROXY:-}
+        NO_PROXY: ${NO_PROXY:-}
     restart: unless-stopped
     env_file:
       - .env
