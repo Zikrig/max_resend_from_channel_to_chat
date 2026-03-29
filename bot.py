@@ -236,7 +236,9 @@ def normalize_outbound_message(
     оставляем исходный массив markup в JSON — иначе клиент теряет выделение при PUT с клавиатурой.
     """
     if text_format in ("markdown", "html"):
-        return text, text_format, markup
+        # Пустой массив span-ов не шлём (иначе в PUT остаётся markup=[])
+        mk = markup if markup else None
+        return text, text_format, mk
     if markup:
         md = apply_markup_spans_as_markdown(text, markup)
         if md != text:
@@ -285,6 +287,62 @@ def markup_from_admin_body(body: Dict[str, Any]) -> Any:
             return None
         out.append(dict(item))
     return out
+
+
+def _strip_markdown_delimiters_for_compare(s: str) -> str:
+    """Снять типичные обёртки MAX markdown для сравнения текста с каноном в трекере."""
+    t = (s or "").strip()
+    if not t:
+        return ""
+    for _ in range(12):
+        old = t
+        t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
+        t = re.sub(r"\+\+([^+]+)\+\+", r"\1", t)
+        t = re.sub(r"`([^`]+)`", r"\1", t)
+        t = re.sub(r"~~([^~]+)~~", r"\1", t)
+        t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", t)
+        if t == old:
+            break
+    return t.strip()
+
+
+def _plain_for_post_edit_compare(s: str, tf_hint: Optional[str]) -> str:
+    x = (s or "").strip()
+    if tf_hint == "html":
+        x = re.sub(r"<[^>]+>", "", x)
+        return re.sub(r"\s+", " ", x).strip()
+    return _strip_markdown_delimiters_for_compare(x)
+
+
+def same_post_text_for_edit_visual(text: str, prev_plain: str, tr: Optional[Dict[str, Any]]) -> bool:
+    """
+    Клиент MAX часто присылает «плоский» текст без *…*, хотя в трекере канон с markdown.
+    Считаем текст тем же, если совпадает строка или визуально (после снятия обёрток).
+    """
+    a = (text or "").strip()
+    b = (prev_plain or "").strip()
+    if a == b:
+        return True
+    if not tr:
+        return False
+    tf_tr = normalize_text_format(tr.get("text_format"))
+    if tf_tr is None:
+        prev = str(tr.get("text") or "")
+        if re.search(r"<[a-zA-Z][^>]*>", prev):
+            tf_tr = "html"
+    return _plain_for_post_edit_compare(a, tf_tr) == _plain_for_post_edit_compare(b, tf_tr)
+
+
+def infer_text_format_from_message_content(text: str) -> Optional[str]:
+    """Если в строке явно есть markdown/html — задаём format для исходящего API."""
+    t = (text or "").strip()
+    if not t:
+        return None
+    if re.search(r"<[a-zA-Z][a-zA-Z0-9]*\b", t):
+        return "html"
+    if re.search(r"\*\*|(?<!\*)\*(?!\*)|\+\+|`|~~", t):
+        return "markdown"
+    return None
 
 
 def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -1413,21 +1471,38 @@ class MaxBot:
             if not isinstance(admin_body, dict):
                 admin_body = {}
             fmt_from_admin = extract_text_format_from_body(admin_body)
-            text_format = fmt_from_admin if fmt_from_admin else (
-                normalize_text_format(tr.get("text_format")) if tr else None
-            )
             mu_ad = markup_from_admin_body(admin_body)
             prev_plain = (str(tr.get("text") or "").strip()) if tr else ""
+            same_visual = (
+                same_post_text_for_edit_visual(text, prev_plain, tr) if tr else text == prev_plain
+            )
             if mu_ad is not None:
                 markup_for_edit = mu_ad
-            elif text == prev_plain:
+            elif same_visual:
                 markup_for_edit = tracked_markup_for_api(tr)
             else:
                 markup_for_edit = None
+
+            if same_visual and fmt_from_admin is None and mu_ad is None:
+                text_for_edit = prev_plain
+            else:
+                text_for_edit = text
+
+            if fmt_from_admin:
+                text_format = fmt_from_admin
+            elif mu_ad is not None and len(mu_ad) == 0:
+                text_format = infer_text_format_from_message_content(text_for_edit)
+            elif mu_ad is not None:
+                text_format = normalize_text_format(tr.get("text_format")) if tr else None
+            elif same_visual:
+                text_format = normalize_text_format(tr.get("text_format")) if tr else None
+            else:
+                text_format = infer_text_format_from_message_content(text_for_edit)
+
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
-                text,
+                text_for_edit,
                 ml,
                 media_attachments=media,
                 chat_message_id=chat_mid or None,
@@ -1436,7 +1511,7 @@ class MaxBot:
             )
             if ok:
                 reg_t, reg_tf, reg_mk = normalize_outbound_message(
-                    text, text_format, markup_for_edit
+                    text_for_edit, text_format, markup_for_edit
                 )
                 self.config.register_tracked_post(
                     cid,
