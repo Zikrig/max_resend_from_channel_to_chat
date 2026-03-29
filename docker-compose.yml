@@ -1,9 +1,6 @@
 services:
   max-forward-bot:
-    build:
-      context: .
-      args:
-        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
+    build: .
     restart: unless-stopped
     env_file:
       - .env
