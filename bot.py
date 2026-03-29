@@ -175,6 +175,71 @@ def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Типы из webhook канала → обёртки по гайду MAX (format=markdown)
+_MARKUP_TYPE_TO_MARKDOWN: Dict[str, tuple[str, str]] = {
+    "emphasized": ("*", "*"),
+    "emphasis": ("*", "*"),
+    "em": ("*", "*"),
+    "italic": ("*", "*"),
+    "strong": ("**", "**"),
+    "bold": ("**", "**"),
+    "strikethrough": ("~~", "~~"),
+    "underline": ("++", "++"),
+    "code": ("`", "`"),
+    "monospace": ("`", "`"),
+}
+
+
+def _markdown_pair_for_span_type(typ: str) -> Optional[tuple[str, str]]:
+    return _MARKUP_TYPE_TO_MARKDOWN.get((typ or "").strip().lower())
+
+
+def apply_markup_spans_as_markdown(text: str, markup: List[Dict[str, Any]]) -> str:
+    """
+    Исходящие POST/PUT: в ответах API разметка часто не отображается только по полю markup.
+    Конвертируем spans в format=markdown и символы в строке text — так клиент показывает выделение
+    (в т.ч. при запросе с inline_keyboard).
+    """
+    if not text or not markup:
+        return text
+    spans: List[tuple[int, int, str]] = []
+    for s in markup:
+        if not isinstance(s, dict):
+            continue
+        try:
+            start = int(s["from"])
+            ln = int(s["length"])
+            typ = str(s.get("type", ""))
+        except (KeyError, TypeError, ValueError):
+            continue
+        if ln <= 0 or start < 0:
+            continue
+        if start >= len(text):
+            logger.warning(
+                "apply_markup_spans_as_markdown: span from=%s за пределами текста len=%s (возможны индексы в UTF-16)",
+                start,
+                len(text),
+            )
+            continue
+        spans.append((start, min(ln, len(text) - start), typ))
+    if not spans:
+        return text
+    spans.sort(key=lambda x: (-x[0], x[1]))
+    out = text
+    for start, ln, typ in spans:
+        end = start + ln
+        if end > len(out):
+            end = len(out)
+        pair = _markdown_pair_for_span_type(typ)
+        if not pair:
+            logger.warning("apply_markup_spans_as_markdown: неизвестный type=%r, фрагмент пропущен", typ)
+            continue
+        left, right = pair
+        chunk = out[start:end]
+        out = out[:start] + left + chunk + right + out[end:]
+    return out
+
+
 def normalize_outbound_message(
     text: str,
     text_format: Optional[str],
@@ -182,13 +247,22 @@ def normalize_outbound_message(
 ) -> tuple[str, Optional[str], Optional[List[Dict[str, Any]]]]:
     """
     Готовим text/format/markup для API.
-    Явный format=markdown|html — как есть (разметка в самой строке text).
-    Иначе при наличии span-markup по умолчанию шлём исходный text + массив markup без
-    подстановки * и format=markdown (индексы from/length относятся к этому text).
+    Явный format=markdown|html — как есть.
+    Иначе span-markup конвертируем в markdown-строку + format=markdown (иначе клиент часто
+    игнорирует только массив markup, в том числе при запросе с клавиатурой).
+    Если конвертация не меняет текст — fallback: исходный text + массив markup.
     """
     if text_format in ("markdown", "html"):
         return text, text_format, markup
     if markup:
+        md = apply_markup_spans_as_markdown(text, markup)
+        if md != text:
+            return md, "markdown", None
+        logger.warning(
+            "normalize_outbound_message: span→markdown не изменил текст (len=%s); "
+            "в запросе передаём массив markup без format (fallback)",
+            len(text or ""),
+        )
         return text, None, markup
     return text, None, None
 
@@ -196,7 +270,7 @@ def normalize_outbound_message(
 def copy_markup_from_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """
     Реальный MAX: в канале приходит body.markup = [{\"from\", \"length\", \"type\"}, ...], без format.
-    Храним копию; при исходящих запросах по умолчанию уходит тот же text + markup (см. normalize_outbound_message).
+    Храним копию; при исходящих запросах normalize_outbound_message переводит spans в markdown + format.
     """
     raw = body.get("markup")
     if not isinstance(raw, list) or not raw:
