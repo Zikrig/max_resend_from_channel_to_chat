@@ -274,6 +274,29 @@ def format_debug_snapshot(body: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+def deep_truncate_strings(obj: Any, max_len: int = 6000) -> Any:
+    """Для логов: обрезает длинные строки (body.text, payload вложений)."""
+    if isinstance(obj, str):
+        if len(obj) > max_len:
+            return obj[:max_len] + f"... (truncated, total len={len(obj)})"
+        return obj
+    if isinstance(obj, dict):
+        return {k: deep_truncate_strings(v, max_len) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [deep_truncate_strings(x, max_len) for x in obj]
+    if isinstance(obj, (bytes, bytearray)):
+        return f"<bytes len={len(obj)}>"
+    return obj
+
+
+def json_for_log(obj: Any, *, max_str: int = 6000) -> str:
+    """JSON для логов с безопасной сериализацией и обрезкой длинных строк."""
+    try:
+        return json.dumps(deep_truncate_strings(obj, max_str), ensure_ascii=False, default=str, indent=2)
+    except Exception as e:
+        return f"<json_for_log failed: {e}>"
+
+
 def log_channel_post_body_from_api(msg: Dict[str, Any], channel_id: int) -> None:
     """
     Фактический webhook message.body по посту канала.
@@ -740,6 +763,7 @@ class MaxBot:
         markup: Optional[List[Dict[str, Any]]] = None,
         *,
         log_api_response_as: Optional[str] = None,
+        log_outbound_payload: bool = False,
     ) -> bool:
         try:
             text, text_format, markup = normalize_outbound_message(text, text_format, markup)
@@ -750,6 +774,13 @@ class MaxBot:
                 payload["markup"] = markup
             if attachments is not None:
                 payload["attachments"] = attachments
+            if log_outbound_payload:
+                logger.info(
+                    "edit_message PUT /messages outbound message_id=%s context=%s\n%s",
+                    message_id,
+                    log_api_response_as or "",
+                    json_for_log({"params": {"message_id": message_id}, "json": payload}),
+                )
             r = await self.client.put("/messages", params={"message_id": message_id}, json=payload)
             if r.status_code != 200:
                 logger.error("Edit failed: %s %s", r.status_code, r.text)
@@ -832,6 +863,8 @@ class MaxBot:
         chat_message_id: Optional[str] = None,
         text_format: Optional[str] = None,
         markup: Optional[List[Dict[str, Any]]] = None,
+        *,
+        log_outbound_payload: bool = False,
     ) -> bool:
         binding = self.config.binding_for_channel(channel_id)
         if not binding:
@@ -846,6 +879,7 @@ class MaxBot:
             text_format=text_format,
             markup=markup,
             log_api_response_as="apply_channel_post_text_edit channel",
+            log_outbound_payload=log_outbound_payload,
         ):
             return False
         chat_mid = (chat_message_id or "").strip()
@@ -859,6 +893,7 @@ class MaxBot:
             text_format=text_format,
             markup=markup,
             log_api_response_as="apply_channel_post_text_edit comments_chat",
+            log_outbound_payload=log_outbound_payload,
         ):
             logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
             return False
@@ -1369,15 +1404,44 @@ class MaxBot:
                 markup_for_edit = tracked_markup_for_api(tr)
             else:
                 markup_for_edit = None
+            tr_snapshot: Dict[str, Any] = {}
+            if tr:
+                tr_snapshot = {
+                    "text": tr.get("text"),
+                    "text_format": tr.get("text_format"),
+                    "markup": tr.get("markup"),
+                    "message_link": tr.get("message_link"),
+                    "chat_message_id": tr.get("chat_message_id"),
+                    "media_attachments": tr.get("media_attachments"),
+                }
             logger.info(
-                "admin post_edit_text: channel_id=%s message_id=%s → PUT body: format=%r, markup=%s, text_len=%s",
+                "admin post_edit_text INCOMING webhook (полное сообщение updates):\n%s",
+                json_for_log(msg),
+            )
+            logger.info(
+                "admin post_edit_text message.body (текст, markup, format и др.):\n%s",
+                json_for_log(admin_body),
+            )
+            logger.info(
+                "admin post_edit_text снимок трекера до правки:\n%s",
+                json_for_log(tr_snapshot),
+            )
+            logger.info(
+                "admin post_edit_text вычислено: fmt_from_admin=%r text_format=%r mu_ad=%s "
+                "markup_for_edit=%s prev_plain_len=%s text_len=%s text==prev_plain=%s channel_id=%s message_id=%s",
+                fmt_from_admin,
+                text_format,
+                "нет ключа"
+                if mu_ad is None
+                else (f"{len(mu_ad)} span(s)" if mu_ad else "[] (сброс)"),
+                "None"
+                if markup_for_edit is None
+                else (f"{len(markup_for_edit)} span(s)" if markup_for_edit else "[]"),
+                len(prev_plain),
+                len(text or ""),
+                text == prev_plain,
                 cid,
                 mid,
-                text_format,
-                "нет"
-                if markup_for_edit is None
-                else f"{len(markup_for_edit)} span(s)",
-                len(text or ""),
             )
             ok = await self.apply_channel_post_text_edit(
                 cid,
@@ -1388,10 +1452,21 @@ class MaxBot:
                 chat_message_id=chat_mid or None,
                 text_format=text_format,
                 markup=markup_for_edit,
+                log_outbound_payload=True,
             )
             if ok:
                 reg_t, reg_tf, reg_mk = normalize_outbound_message(
                     text, text_format, markup_for_edit
+                )
+                logger.info(
+                    "admin post_edit_text сохранение в трекер (после normalize_outbound_message):\n%s",
+                    json_for_log(
+                        {
+                            "text": reg_t,
+                            "text_format": reg_tf,
+                            "markup": reg_mk,
+                        }
+                    ),
                 )
                 self.config.register_tracked_post(
                     cid,
