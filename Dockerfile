@@ -8,7 +8,7 @@ ENV PYTHONUNBUFFERED=1 \
 
 COPY requirements.txt .
 # Медленный/нестабильный доступ к pypi.org — дольше ждём и больше ретраев
-RUN pip install --timeout 120 --retries 10 -r requirements.txt
+RUN pip install --timeout 40 --retries 3 -r requirements.txt
 
 COPY bot.py .
 
