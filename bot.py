@@ -140,6 +140,22 @@ def normalize_text_format(raw: Any) -> Optional[str]:
     return None
 
 
+def text_suggests_markdown(s: str) -> bool:
+    """
+    Клиент MAX часто не присылает body.format у исходящего сообщения админа.
+    Если в трекере нет text_format, но в тексте есть типичные маркеры markdown — считаем format=markdown.
+    """
+    if not s or not isinstance(s, str):
+        return False
+    if "**" in s or "`" in s or "~~" in s:
+        return True
+    if "](" in s and "[" in s:
+        return True
+    if re.search(r"(?<!\*)\*[^*\n]+\*(?!\*)", s):
+        return True
+    return False
+
+
 def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
     """Ищем enum format (markdown/html). Поле markup здесь не смотрим — это массив span-ов, см. copy_markup_from_body."""
     for key in (
@@ -159,71 +175,6 @@ def extract_text_format_from_body(body: Dict[str, Any]) -> Optional[str]:
     return None
 
 
-# Типы из webhook канала → обёртки по гайду MAX (format=markdown)
-_MARKUP_TYPE_TO_MARKDOWN: Dict[str, tuple[str, str]] = {
-    "emphasized": ("*", "*"),
-    "emphasis": ("*", "*"),
-    "em": ("*", "*"),
-    "italic": ("*", "*"),
-    "strong": ("**", "**"),
-    "bold": ("**", "**"),
-    "strikethrough": ("~~", "~~"),
-    "underline": ("++", "++"),
-    "code": ("`", "`"),
-    "monospace": ("`", "`"),
-}
-
-
-def _markdown_pair_for_span_type(typ: str) -> Optional[tuple[str, str]]:
-    return _MARKUP_TYPE_TO_MARKDOWN.get((typ or "").strip().lower())
-
-
-def apply_markup_spans_as_markdown(text: str, markup: List[Dict[str, Any]]) -> str:
-    """
-    В исходящих POST/PUT поле body.markup сервер фактически не применяет (ответ без markup).
-    Официально бот шлёт разметку через format=markdown и символы * ` ++ и т.д.
-    """
-    if not text or not markup:
-        return text
-    spans: List[tuple[int, int, str]] = []
-    for s in markup:
-        if not isinstance(s, dict):
-            continue
-        try:
-            start = int(s["from"])
-            ln = int(s["length"])
-            typ = str(s.get("type", ""))
-        except (KeyError, TypeError, ValueError):
-            continue
-        if ln <= 0 or start < 0:
-            continue
-        if start >= len(text):
-            logger.warning(
-                "apply_markup_spans_as_markdown: span from=%s за пределами текста len=%s (возможны индексы в UTF-16 — разметка не применена)",
-                start,
-                len(text),
-            )
-            continue
-        spans.append((start, min(ln, len(text) - start), typ))
-    if not spans:
-        return text
-    # Справа налево по индексу, чтобы смещения не ломались; при одном from — сначала более короткий (внутренний)
-    spans.sort(key=lambda x: (-x[0], x[1]))
-    out = text
-    for start, ln, typ in spans:
-        end = start + ln
-        if end > len(out):
-            end = len(out)
-        pair = _markdown_pair_for_span_type(typ)
-        if not pair:
-            logger.warning("apply_markup_spans_as_markdown: неизвестный type=%r, фрагмент пропущен", typ)
-            continue
-        left, right = pair
-        chunk = out[start:end]
-        out = out[:start] + left + chunk + right + out[end:]
-    return out
-
-
 def normalize_outbound_message(
     text: str,
     text_format: Optional[str],
@@ -231,23 +182,13 @@ def normalize_outbound_message(
 ) -> tuple[str, Optional[str], Optional[List[Dict[str, Any]]]]:
     """
     Готовим text/format/markup для API.
-    Span-markup из канала конвертируем в format=markdown + символы в тексте.
-    Если конвертация не меняет текст (индексы/type не сошлись), не шлём пустой markdown:
-    оставляем исходный массив markup в JSON — иначе клиент теряет выделение при PUT с клавиатурой.
+    Явный format=markdown|html — как есть (разметка в самой строке text).
+    Иначе при наличии span-markup по умолчанию шлём исходный text + массив markup без
+    подстановки * и format=markdown (индексы from/length относятся к этому text).
     """
     if text_format in ("markdown", "html"):
-        # Пустой массив span-ов не шлём (иначе в PUT остаётся markup=[])
-        mk = markup if markup else None
-        return text, text_format, mk
+        return text, text_format, markup
     if markup:
-        md = apply_markup_spans_as_markdown(text, markup)
-        if md != text:
-            return md, "markdown", None
-        logger.warning(
-            "normalize_outbound_message: span→markdown не изменил текст (len=%s); "
-            "в запросе передаём массив markup без format (как fallback)",
-            len(text or ""),
-        )
         return text, None, markup
     return text, None, None
 
@@ -255,7 +196,7 @@ def normalize_outbound_message(
 def copy_markup_from_body(body: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
     """
     Реальный MAX: в канале приходит body.markup = [{\"from\", \"length\", \"type\"}, ...], без format.
-    Храним копию для повторной конвертации при PUT; в API уходит уже markdown через normalize_outbound_message.
+    Храним копию; при исходящих запросах по умолчанию уходит тот же text + markup (см. normalize_outbound_message).
     """
     raw = body.get("markup")
     if not isinstance(raw, list) or not raw:
@@ -287,62 +228,6 @@ def markup_from_admin_body(body: Dict[str, Any]) -> Any:
             return None
         out.append(dict(item))
     return out
-
-
-def _strip_markdown_delimiters_for_compare(s: str) -> str:
-    """Снять типичные обёртки MAX markdown для сравнения текста с каноном в трекере."""
-    t = (s or "").strip()
-    if not t:
-        return ""
-    for _ in range(12):
-        old = t
-        t = re.sub(r"\*\*([^*]+)\*\*", r"\1", t)
-        t = re.sub(r"\+\+([^+]+)\+\+", r"\1", t)
-        t = re.sub(r"`([^`]+)`", r"\1", t)
-        t = re.sub(r"~~([^~]+)~~", r"\1", t)
-        t = re.sub(r"(?<!\*)\*([^*]+)\*(?!\*)", r"\1", t)
-        if t == old:
-            break
-    return t.strip()
-
-
-def _plain_for_post_edit_compare(s: str, tf_hint: Optional[str]) -> str:
-    x = (s or "").strip()
-    if tf_hint == "html":
-        x = re.sub(r"<[^>]+>", "", x)
-        return re.sub(r"\s+", " ", x).strip()
-    return _strip_markdown_delimiters_for_compare(x)
-
-
-def same_post_text_for_edit_visual(text: str, prev_plain: str, tr: Optional[Dict[str, Any]]) -> bool:
-    """
-    Клиент MAX часто присылает «плоский» текст без *…*, хотя в трекере канон с markdown.
-    Считаем текст тем же, если совпадает строка или визуально (после снятия обёрток).
-    """
-    a = (text or "").strip()
-    b = (prev_plain or "").strip()
-    if a == b:
-        return True
-    if not tr:
-        return False
-    tf_tr = normalize_text_format(tr.get("text_format"))
-    if tf_tr is None:
-        prev = str(tr.get("text") or "")
-        if re.search(r"<[a-zA-Z][^>]*>", prev):
-            tf_tr = "html"
-    return _plain_for_post_edit_compare(a, tf_tr) == _plain_for_post_edit_compare(b, tf_tr)
-
-
-def infer_text_format_from_message_content(text: str) -> Optional[str]:
-    """Если в строке явно есть markdown/html — задаём format для исходящего API."""
-    t = (text or "").strip()
-    if not t:
-        return None
-    if re.search(r"<[a-zA-Z][a-zA-Z0-9]*\b", t):
-        return "html"
-    if re.search(r"\*\*|(?<!\*)\*(?!\*)|\+\+|`|~~", t):
-        return "markdown"
-    return None
 
 
 def message_body_text_and_format(body: Dict[str, Any]) -> tuple[str, Optional[str]]:
@@ -1471,38 +1356,33 @@ class MaxBot:
             if not isinstance(admin_body, dict):
                 admin_body = {}
             fmt_from_admin = extract_text_format_from_body(admin_body)
+            text_format = fmt_from_admin if fmt_from_admin else (
+                normalize_text_format(tr.get("text_format")) if tr else None
+            )
+            if text_format is None and text and text_suggests_markdown(text):
+                text_format = "markdown"
             mu_ad = markup_from_admin_body(admin_body)
             prev_plain = (str(tr.get("text") or "").strip()) if tr else ""
-            same_visual = (
-                same_post_text_for_edit_visual(text, prev_plain, tr) if tr else text == prev_plain
-            )
             if mu_ad is not None:
                 markup_for_edit = mu_ad
-            elif same_visual:
+            elif text == prev_plain:
                 markup_for_edit = tracked_markup_for_api(tr)
             else:
                 markup_for_edit = None
-
-            if same_visual and fmt_from_admin is None and mu_ad is None:
-                text_for_edit = prev_plain
-            else:
-                text_for_edit = text
-
-            if fmt_from_admin:
-                text_format = fmt_from_admin
-            elif mu_ad is not None and len(mu_ad) == 0:
-                text_format = infer_text_format_from_message_content(text_for_edit)
-            elif mu_ad is not None:
-                text_format = normalize_text_format(tr.get("text_format")) if tr else None
-            elif same_visual:
-                text_format = normalize_text_format(tr.get("text_format")) if tr else None
-            else:
-                text_format = infer_text_format_from_message_content(text_for_edit)
-
+            logger.info(
+                "admin post_edit_text: channel_id=%s message_id=%s → PUT body: format=%r, markup=%s, text_len=%s",
+                cid,
+                mid,
+                text_format,
+                "нет"
+                if markup_for_edit is None
+                else f"{len(markup_for_edit)} span(s)",
+                len(text or ""),
+            )
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
-                text_for_edit,
+                text,
                 ml,
                 media_attachments=media,
                 chat_message_id=chat_mid or None,
@@ -1511,7 +1391,7 @@ class MaxBot:
             )
             if ok:
                 reg_t, reg_tf, reg_mk = normalize_outbound_message(
-                    text_for_edit, text_format, markup_for_edit
+                    text, text_format, markup_for_edit
                 )
                 self.config.register_tracked_post(
                     cid,
