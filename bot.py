@@ -203,6 +203,39 @@ def _span_url_from_dict(s: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+# Как может называться цитата в span.type (MAX/клиенты часто не «blockquote»)
+_BLOCKQUOTE_SPAN_TYPES: frozenset[str] = frozenset(
+    {
+        "blockquote",
+        "quote",
+        "block_quote",
+        "blockquote_open",
+        "citation",
+        "cite",
+        "quotation",
+        "text_quote",
+        "textquote",
+        "collapsed_quote",
+        "expandable_blockquote",
+        "expandable_quote",
+        "quote_open",
+        "quote_close",
+    }
+)
+
+
+def _span_looks_like_blockquote(s: Dict[str, Any], typ: str) -> bool:
+    if typ in _BLOCKQUOTE_SPAN_TYPES:
+        return True
+    for key in ("style", "block_type", "blockType", "kind", "variant"):
+        v = s.get(key)
+        if isinstance(v, str) and v.strip().lower() in ("quote", "blockquote", "citation", "cite"):
+            return True
+    if s.get("blockquote") is True or s.get("is_quote") is True or s.get("isQuote") is True:
+        return True
+    return False
+
+
 def _heading_level_from_type_and_dict(typ: str, s: Dict[str, Any]) -> Optional[int]:
     """Уровень заголовка 1..6 из type (heading_2) или полей level/depth/size."""
     raw = (typ or "").strip().lower()
@@ -236,7 +269,7 @@ def _span_to_markdown_replacement(out: str, start: int, end: int, s: Dict[str, A
     if url:
         return f"[{chunk}]({url})"
 
-    if typ in ("blockquote", "quote", "block_quote", "blockquote_open"):
+    if _span_looks_like_blockquote(s, typ):
         return "\n".join("> " + line for line in chunk.split("\n"))
 
     hl = _heading_level_from_type_and_dict(typ, s)
