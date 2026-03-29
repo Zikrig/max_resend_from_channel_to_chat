@@ -4,5 +4,7 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    ports:
+      - "8000:8000"
     volumes:
       - .:/app  # Это сохраняет config.json даже после удаления контейнера
