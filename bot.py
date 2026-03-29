@@ -90,7 +90,7 @@ def parse_listen_host_port(raw: str) -> Tuple[str, int]:
 async def max_subscribe_webhook(client: httpx.AsyncClient, url: str, secret: Optional[str]) -> None:
     payload: Dict[str, Any] = {
         "url": url,
-        "update_types": ["message_created", "message_callback"],
+        "update_types": ["message_created", "message_callback", "bot_started"],
     }
     if secret:
         payload["secret"] = secret
@@ -1249,6 +1249,10 @@ class MaxBot:
             await self.on_message_created(update.get("message", {}))
         elif update_type == "message_callback":
             await self.on_callback(update)
+        elif update_type == "bot_started":
+            logger.info("Webhook bot_started (пользователь открыл чат с ботом): %s", update)
+        else:
+            logger.warning("Неизвестный update_type=%r (добавьте обработку или расширьте подписку)", update_type)
 
     async def on_message_created(self, msg: Dict[str, Any]) -> None:
         sender = msg.get("sender", {})
@@ -1257,6 +1261,17 @@ class MaxBot:
         raw_chat_id = recipient.get("chat_id") or recipient.get("chat", {}).get("chat_id") or recipient.get("user_id")
         chat_id = int(raw_chat_id) if raw_chat_id is not None else None
         message_id = msg.get("body", {}).get("mid")
+        text_preview = ((msg.get("body") or {}).get("text") or "")[:120]
+
+        logger.info(
+            "message_created sender_id=%s chat_id=%s mid=%s text=%r",
+            sender_id,
+            chat_id,
+            message_id,
+            text_preview,
+        )
+        if chat_id is None:
+            logger.warning("message_created: chat_id=None (проверьте формат recipient в MAX), recipient=%s", recipient)
 
         if sender_id and self.bot_id and sender_id == self.bot_id:
             return
@@ -1277,11 +1292,20 @@ class MaxBot:
                 await self.delete_message(message_id)
                 return
 
+        public_ids = self.config.all_channel_ids() | self.config.all_comments_chat_ids()
         if self.is_admin(sender_id):
-            public_ids = self.config.all_channel_ids() | self.config.all_comments_chat_ids()
             is_not_public = chat_id not in public_ids
             if is_not_public:
                 await self.process_admin_message(msg)
+            return
+
+        if sender_id is not None and (chat_id is None or chat_id not in public_ids):
+            await self.send_message(
+                sender_id,
+                "Этот бот настраивается только администраторами (каналы, реклама, кнопки). "
+                "Ваш user_id должен быть в переменной ADMIN_USER_IDS в .env на сервере. "
+                "Если вы админ — отправьте команду /admin.",
+            )
 
     async def process_channel_post(self, msg: Dict[str, Any]) -> None:
         message_id = msg.get("body", {}).get("mid")
