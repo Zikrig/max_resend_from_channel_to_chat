@@ -194,22 +194,86 @@ def _markdown_pair_for_span_type(typ: str) -> Optional[tuple[str, str]]:
     return _MARKUP_TYPE_TO_MARKDOWN.get((typ or "").strip().lower())
 
 
+def _span_url_from_dict(s: Dict[str, Any]) -> Optional[str]:
+    """Ссылка в span: разные клиенты/API могут называть поле по-разному."""
+    for key in ("url", "link", "href", "uri", "target"):
+        v = s.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
+def _heading_level_from_type_and_dict(typ: str, s: Dict[str, Any]) -> Optional[int]:
+    """Уровень заголовка 1..6 из type (heading_2) или полей level/depth/size."""
+    raw = (typ or "").strip().lower()
+    m = re.match(r"^heading[_\s-]?(\d)$", raw)
+    if m:
+        return max(1, min(6, int(m.group(1))))
+    if len(raw) == 2 and raw[0] == "h" and raw[1].isdigit():
+        return max(1, min(6, int(raw[1])))
+    for key in ("level", "depth", "size", "header_level"):
+        v = s.get(key)
+        if v is None:
+            continue
+        try:
+            return max(1, min(6, int(v)))
+        except (TypeError, ValueError):
+            continue
+    if raw in ("heading", "header", "title"):
+        return 1
+    return None
+
+
+def _span_to_markdown_replacement(out: str, start: int, end: int, s: Dict[str, Any]) -> Optional[str]:
+    """
+    Замена для out[start:end] в markdown. None — не умеем (фрагмент пропускается).
+    Сначала ссылки и блоки (часто с полем url / level без совпадения по type в словаре).
+    """
+    chunk = out[start:end]
+    typ = str(s.get("type", "") or "").strip().lower()
+
+    url = _span_url_from_dict(s)
+    if url:
+        return f"[{chunk}]({url})"
+
+    if typ in ("blockquote", "quote", "block_quote", "blockquote_open"):
+        return "\n".join("> " + line for line in chunk.split("\n"))
+
+    hl = _heading_level_from_type_and_dict(typ, s)
+    if hl is not None:
+        return ("#" * hl) + " " + chunk.lstrip()
+
+    pair = _markdown_pair_for_span_type(typ)
+    if pair:
+        left, right = pair
+        return left + chunk + right
+
+    if typ in ("link", "text_link", "hyperlink", "url"):
+        logger.warning(
+            "span type=%r без url в объекте span, ключи=%s — пропуск",
+            typ,
+            sorted(s.keys()),
+        )
+        return None
+
+    return None
+
+
 def apply_markup_spans_as_markdown(text: str, markup: List[Dict[str, Any]]) -> str:
     """
     Исходящие POST/PUT: в ответах API разметка часто не отображается только по полю markup.
     Конвертируем spans в format=markdown и символы в строке text — так клиент показывает выделение
-    (в т.ч. при запросе с inline_keyboard).
+    (в т.ч. при запросе с клавиатурой). Ссылки (поле url), заголовки, цитаты, базовые стили.
     """
     if not text or not markup:
         return text
-    spans: List[tuple[int, int, str]] = []
+    spans: List[tuple[int, int, Dict[str, Any]]] = []
     for s in markup:
         if not isinstance(s, dict):
             continue
         try:
             start = int(s["from"])
             ln = int(s["length"])
-            typ = str(s.get("type", ""))
         except (KeyError, TypeError, ValueError):
             continue
         if ln <= 0 or start < 0:
@@ -221,22 +285,24 @@ def apply_markup_spans_as_markdown(text: str, markup: List[Dict[str, Any]]) -> s
                 len(text),
             )
             continue
-        spans.append((start, min(ln, len(text) - start), typ))
+        spans.append((start, min(ln, len(text) - start), s))
     if not spans:
         return text
     spans.sort(key=lambda x: (-x[0], x[1]))
     out = text
-    for start, ln, typ in spans:
+    for start, ln, s in spans:
         end = start + ln
         if end > len(out):
             end = len(out)
-        pair = _markdown_pair_for_span_type(typ)
-        if not pair:
-            logger.warning("apply_markup_spans_as_markdown: неизвестный type=%r, фрагмент пропущен", typ)
+        replacement = _span_to_markdown_replacement(out, start, end, s)
+        if replacement is None:
+            logger.warning(
+                "apply_markup_spans_as_markdown: неизвестный span type=%r keys=%s — пропуск",
+                s.get("type"),
+                sorted(s.keys()),
+            )
             continue
-        left, right = pair
-        chunk = out[start:end]
-        out = out[:start] + left + chunk + right + out[end:]
+        out = out[:start] + replacement + out[end:]
     return out
 
 
