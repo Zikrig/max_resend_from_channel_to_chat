@@ -350,9 +350,13 @@ def normalize_outbound_message(
     Иначе span-markup конвертируем в markdown-строку + format=markdown (иначе клиент часто
     игнорирует только массив markup, в том числе при запросе с клавиатурой).
     Если конвертация не меняет текст — fallback: исходный text + массив markup.
+    При format=markdown и непустом markup одновременно отображение часто ломается: встраиваем spans в строку (*…*) и не шлём markup.
     """
     if text_format in ("markdown", "html"):
-        # Пустой [] не передаём в API как ключ markup (см. edit_message) — иначе ломается markdown.
+        if text_format == "markdown" and markup:
+            md = apply_markup_spans_as_markdown(text, markup)
+            if md != text:
+                return md, "markdown", None
         return text, text_format, markup if markup else None
     if markup:
         md = apply_markup_spans_as_markdown(text, markup)
