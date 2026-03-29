@@ -25,6 +25,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import uvicorn
 from starlette.applications import Starlette
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
@@ -2236,6 +2237,10 @@ async def run_webhook_server(
     async def on_webhook(request: Request) -> Response:
         if webhook_secret:
             if request.headers.get("X-Max-Bot-Api-Secret") != webhook_secret:
+                logger.warning(
+                    "Webhook 403: секрет не совпал или заголовок X-Max-Bot-Api-Secret отсутствует "
+                    "(проверьте WEBHOOK_SECRET в .env и подписку POST /subscriptions)"
+                )
                 return Response(status_code=403)
         try:
             body = await request.json()
@@ -2258,7 +2263,17 @@ async def run_webhook_server(
         Route(path, on_webhook, methods=["POST"]),
         Route("/health", health, methods=["GET"]),
     ]
+
+    class AccessLogMiddleware(BaseHTTPMiddleware):
+        async def dispatch(self, request: Request, call_next: Any) -> Any:
+            if not (request.url.path == "/health" and request.method == "GET"):
+                peer = request.client.host if request.client else "?"
+                logger.info("HTTP %s %s from %s", request.method, request.url.path, peer)
+            return await call_next(request)
+
     app = Starlette(routes=routes)
+    if os.environ.get("WEBHOOK_ACCESS_LOG", "1").strip() not in ("0", "false", "no"):
+        app.add_middleware(AccessLogMiddleware)
     uvicorn_log = os.environ.get("LOG_LEVEL", "info").lower()
     config = uvicorn.Config(app, host=listen_host, port=listen_port, log_level=uvicorn_log)
     server = uvicorn.Server(config)
