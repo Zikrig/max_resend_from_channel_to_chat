@@ -20,7 +20,7 @@ ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
     NO_PROXY=${NO_PROXY}
 
 COPY requirements.txt .
-RUN pip install --no-cache-dir \
+RUN pip install \
     --index-url "${PIP_INDEX_URL}" \
     --extra-index-url https://pypi.org/simple \
     --extra-index-url https://mirror.yandex.ru/mirrors/pypi/simple/ \
