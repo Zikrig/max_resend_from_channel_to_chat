@@ -1,6 +1,10 @@
 services:
   max-forward-bot:
-    build: .
+    build:
+      context: .
+      args:
+        # Индекс для pip при сборке образа (зеркало, если pypi.org не открывается)
+        PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple/
     restart: unless-stopped
     env_file:
       - .env

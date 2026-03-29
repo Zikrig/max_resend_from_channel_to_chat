@@ -2,12 +2,16 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-ENV PYTHONUNBUFFERED=1 \
+# Сборка: pip тянет пакеты с этого индекса. При таймаутах до pypi.org переопределите:
+#   docker build --build-arg PIP_INDEX_URL=https://mirror.yandex.ru/mirrors/pypi/simple/ .
+# Другие зеркала: https://pypi.tuna.tsinghua.edu.cn/simple (CN), официальный: https://pypi.org/simple
+ARG PIP_INDEX_URL=https://mirror.yandex.ru/mirrors/pypi/simple/
+ENV PIP_INDEX_URL=${PIP_INDEX_URL} \
+    PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
     PIP_DEFAULT_TIMEOUT=120
 
 COPY requirements.txt .
-# Медленный/нестабильный доступ к pypi.org — дольше ждём и больше ретраев
 RUN pip install --timeout 120 --retries 10 -r requirements.txt
 
 COPY bot.py .
