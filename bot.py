@@ -110,6 +110,13 @@ async def max_unsubscribe_webhook(client: httpx.AsyncClient, url: str) -> None:
         logger.warning("DELETE /subscriptions: %s", data.get("message"))
 
 
+async def max_list_subscriptions(client: httpx.AsyncClient) -> Any:
+    """GET /subscriptions — список текущих подписок на вебхук (док: dev.max.ru GET subscriptions)."""
+    r = await client.get("/subscriptions")
+    r.raise_for_status()
+    return r.json()
+
+
 class AdminState(Enum):
     NONE = "none"
     AWAITING_AD_TEXT = "awaiting_ad_text"
@@ -2290,6 +2297,16 @@ async def run_webhook_server(
             await serve_task
             raise SystemExit(1) from e
         subscribed_ok = True
+        try:
+            listed = await max_list_subscriptions(bot.client)
+            listed_s = (
+                json.dumps(listed, ensure_ascii=False, default=str)
+                if isinstance(listed, (dict, list))
+                else repr(listed)
+            )
+            logger.info("GET /subscriptions (текущие подписки): %s", listed_s)
+        except Exception as e:
+            logger.warning("GET /subscriptions не удалось: %s", e)
         logger.info(
             "Webhook mode: подписка активна, URL=%s, слушаем %s:%s path=%s",
             full_url,
