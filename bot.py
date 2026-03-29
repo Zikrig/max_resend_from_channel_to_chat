@@ -2200,6 +2200,15 @@ async def run_webhook_server(
         logger.critical("%s", e)
         sys.exit(1)
 
+    async def webhook_get(_: Request) -> JSONResponse:
+        return JSONResponse(
+            {
+                "ok": True,
+                "webhook": True,
+                "detail": "События от MAX приходят POST с телом Update. Откройте в браузере только для проверки; бот отвечает в чатах MAX, не здесь.",
+            }
+        )
+
     async def on_webhook(request: Request) -> Response:
         if webhook_secret:
             if request.headers.get("X-Max-Bot-Api-Secret") != webhook_secret:
@@ -2210,6 +2219,7 @@ async def run_webhook_server(
             return Response(status_code=400)
         if not isinstance(body, dict):
             return Response(status_code=400)
+        logger.info("Webhook POST: update_type=%r", body.get("update_type"))
         try:
             await bot.handle_update(body)
         except Exception:
@@ -2220,6 +2230,7 @@ async def run_webhook_server(
         return JSONResponse({"ok": True})
 
     routes = [
+        Route(path, webhook_get, methods=["GET"]),
         Route(path, on_webhook, methods=["POST"]),
         Route("/health", health, methods=["GET"]),
     ]
