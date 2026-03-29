@@ -3,8 +3,7 @@ services:
     build:
       context: .
       args:
-        # Индекс для pip при сборке образа (зеркало, если pypi.org не открывается)
-        PIP_INDEX_URL: https://mirror.yandex.ru/mirrors/pypi/simple/
+        PIP_INDEX_URL: https://mirrors.aliyun.com/pypi/simple/
     restart: unless-stopped
     env_file:
       - .env
