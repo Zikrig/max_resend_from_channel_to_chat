@@ -3,3 +3,5 @@
 config.json
 .env.fight
 /__pycache__
+/config
+.env.webhook
