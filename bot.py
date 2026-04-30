@@ -18,10 +18,16 @@ import sys
 import time
 from datetime import datetime, time as dtime
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 import httpx
+import uvicorn
+from starlette.applications import Starlette
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route
 
 API_BASE = "https://platform-api.max.ru"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
@@ -44,6 +50,8 @@ root_logger.handlers.clear()
 root_logger.addHandler(handler)
 root_logger.setLevel(logging.INFO)
 logger = logging.getLogger("MaxBot")
+
+WEBHOOK_SECRET_RE = re.compile(r"^[a-zA-Z0-9_-]{5,256}$")
 
 
 class AdminState(Enum):
@@ -540,6 +548,56 @@ def is_time_in_range(now_value: dtime, range_value: str) -> bool:
     if start_time <= end_time:
         return start_time <= now_value <= end_time
     return now_value >= start_time or now_value <= end_time
+
+
+def normalize_webhook_url(url: str) -> Tuple[str, str]:
+    raw = (url or "").strip()
+    parsed = urlparse(raw)
+    if parsed.scheme != "https":
+        raise ValueError("WEBHOOK_URL должен начинаться с https://")
+    if not parsed.netloc:
+        raise ValueError("WEBHOOK_URL: не указан хост")
+    path = (parsed.path or "").strip()
+    if not path or path == "/":
+        return f"https://{parsed.netloc}/webhook", "/webhook"
+    if not path.startswith("/"):
+        path = "/" + path
+    return f"https://{parsed.netloc}{path}", path
+
+
+def parse_listen_host_port(raw: str) -> Tuple[str, int]:
+    value = (raw or "").strip()
+    if ":" not in value:
+        return value, 8091
+    host, _, port_raw = value.rpartition(":")
+    host = host or "0.0.0.0"
+    try:
+        port = int(port_raw)
+    except ValueError as exc:
+        raise ValueError(f"Некорректный порт в WEBHOOK_LISTEN: {raw!r}") from exc
+    return host, port
+
+
+async def max_subscribe_webhook(client: httpx.AsyncClient, url: str, secret: Optional[str]) -> None:
+    payload: Dict[str, Any] = {
+        "url": url,
+        "update_types": ["message_created", "message_callback", "bot_started"],
+    }
+    if secret:
+        payload["secret"] = secret
+    r = await client.post("/subscriptions", json=payload)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, dict) and data.get("success") is False:
+        raise RuntimeError(data.get("message") or "POST /subscriptions вернул success=false")
+
+
+async def max_unsubscribe_webhook(client: httpx.AsyncClient, url: str) -> None:
+    r = await client.delete("/subscriptions", params={"url": url})
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, dict) and data.get("success") is False:
+        logger.warning("DELETE /subscriptions: %s", data.get("message"))
 
 
 def normalize_max_url(url: str) -> str:
@@ -2122,29 +2180,74 @@ class MaxBot:
             await self.send_message(sender_id, f"Админ удален: {remove_admin_id}")
             await self.send_admins_submenu(sender_id)
 
-    async def run(self) -> None:
-        await self.get_me()
-        marker = None
-        logger.info("Bot started polling in Moscow timezone.")
-        while True:
+async def run_webhook_server(
+    bot: MaxBot,
+    webhook_url: str,
+    webhook_secret: Optional[str],
+    listen_host: str,
+    listen_port: int,
+) -> None:
+    await bot.get_me()
+    full_url, path = normalize_webhook_url(webhook_url)
+
+    async def on_webhook(request: Request) -> Response:
+        if webhook_secret:
+            if request.headers.get("X-Max-Bot-Api-Secret") != webhook_secret:
+                return Response(status_code=403)
+        try:
+            body = await request.json()
+        except Exception:
+            return Response(status_code=400)
+        if not isinstance(body, dict):
+            return Response(status_code=400)
+        logger.info("Webhook POST: update_type=%r", body.get("update_type"))
+        try:
+            await bot.handle_update(body)
+        except Exception:
+            logger.exception("handle_update failed (webhook)")
+        return Response(status_code=200)
+
+    async def webhook_get(_: Request) -> JSONResponse:
+        return JSONResponse({"ok": True, "webhook": True})
+
+    async def health(_: Request) -> JSONResponse:
+        return JSONResponse({"ok": True})
+
+    app = Starlette(
+        routes=[
+            Route(path, on_webhook, methods=["POST"]),
+            Route(path, webhook_get, methods=["GET"]),
+            Route("/health", health, methods=["GET"]),
+        ]
+    )
+    config = uvicorn.Config(
+        app,
+        host=listen_host,
+        port=listen_port,
+        log_level=os.environ.get("LOG_LEVEL", "info").lower(),
+    )
+    server = uvicorn.Server(config)
+    serve_task = asyncio.create_task(server.serve())
+    while not server.started:
+        await asyncio.sleep(0.05)
+    subscribed_ok = False
+    try:
+        await max_subscribe_webhook(bot.client, full_url, webhook_secret)
+        subscribed_ok = True
+        logger.info(
+            "Webhook mode: подписка активна, URL=%s, слушаем %s:%s path=%s",
+            full_url,
+            listen_host,
+            listen_port,
+            path,
+        )
+        await serve_task
+    finally:
+        if subscribed_ok:
             try:
-                params = {"limit": 100, "timeout": 30}
-                if marker is not None:
-                    params["marker"] = marker
-                r = await self.client.get("/updates", params=params)
-                r.raise_for_status()
-                data = r.json()
-                for update in data.get("updates", []):
-                    if isinstance(update, dict):
-                        await self.handle_update(update)
-                marker = data.get("marker")
+                await max_unsubscribe_webhook(bot.client, full_url)
             except Exception as e:
-                logger.exception(
-                    "Polling /updates failed: %s: %r",
-                    type(e).__name__,
-                    e,
-                )
-                await asyncio.sleep(5)
+                logger.warning("Отписка webhook не удалась: %s", e)
 
 
 async def main() -> None:
@@ -2152,9 +2255,25 @@ async def main() -> None:
     if not token:
         logger.error("MAX_BOT_TOKEN not found in environment!")
         return
+    webhook_url = (os.environ.get("WEBHOOK_URL") or "").strip()
+    if not webhook_url:
+        logger.error("Укажите WEBHOOK_URL (публичный https://... для POST /subscriptions).")
+        return
+    webhook_secret_raw = (os.environ.get("WEBHOOK_SECRET") or "").strip()
+    webhook_secret: Optional[str] = None
+    if webhook_secret_raw:
+        if not WEBHOOK_SECRET_RE.match(webhook_secret_raw):
+            logger.error("WEBHOOK_SECRET должен быть 5-256 символов [a-zA-Z0-9_-].")
+            return
+        webhook_secret = webhook_secret_raw
+    try:
+        listen_host, listen_port = parse_listen_host_port(os.environ.get("WEBHOOK_LISTEN", "0.0.0.0:8091"))
+    except ValueError as e:
+        logger.error("%s", e)
+        return
     bot = MaxBot(token, Config())
     try:
-        await bot.run()
+        await run_webhook_server(bot, webhook_url, webhook_secret, listen_host, listen_port)
     finally:
         await bot.client.aclose()
 

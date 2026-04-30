@@ -10,4 +10,6 @@ RUN pip install -r requirements.txt
 
 COPY bot.py .
 
+EXPOSE 8091
+
 CMD ["python", "bot.py"]
