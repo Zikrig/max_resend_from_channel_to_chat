@@ -1029,9 +1029,11 @@ class MaxBot:
         *,
         log_api_response_as: Optional[str] = None,
         log_outbound_payload: bool = False,
+        normalize_outbound: bool = True,
     ) -> bool:
         try:
-            text, text_format, markup = normalize_outbound_message(text, text_format, markup)
+            if normalize_outbound:
+                text, text_format, markup = normalize_outbound_message(text, text_format, markup)
             payload: Dict[str, Any] = {"text": text}
             if text_format in ("markdown", "html"):
                 payload["format"] = text_format
@@ -1154,6 +1156,7 @@ class MaxBot:
                 markup=cur_mk,
                 buttons_enabled=True,
                 log_outbound_payload=False,
+                normalize_outbound=False,
             )
             if ok and kb_att:
                 self.config.register_tracked_post(
@@ -1194,6 +1197,7 @@ class MaxBot:
         buttons_enabled: Optional[bool] = None,
         *,
         log_outbound_payload: bool = False,
+        normalize_outbound: bool = True,
     ) -> bool:
         binding = self.config.binding_for_channel(channel_id)
         if not binding:
@@ -1212,6 +1216,7 @@ class MaxBot:
             markup=markup,
             log_api_response_as="apply_channel_post_text_edit channel",
             log_outbound_payload=log_outbound_payload,
+            normalize_outbound=normalize_outbound,
         ):
             return False
         chat_mid = (chat_message_id or "").strip()
@@ -1226,6 +1231,7 @@ class MaxBot:
             markup=markup,
             log_api_response_as="apply_channel_post_text_edit comments_chat",
             log_outbound_payload=log_outbound_payload,
+            normalize_outbound=normalize_outbound,
         ):
             logger.error("Не удалось обновить копию поста в чате (message_id=%s)", chat_mid)
             return False
