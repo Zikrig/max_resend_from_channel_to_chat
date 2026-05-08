@@ -1143,15 +1143,17 @@ class MaxBot:
                 return
             cur_text, cur_tf, cur_mk, cur_media = current
             kb_att = self.build_channel_keyboard_attachment(binding, message_link)
-            channel_attachments = list(cur_media)
-            channel_attachments.extend(kb_att)
-            ok = await self.edit_message(
-                message_id,
-                cur_text,
-                channel_attachments,
+            ok = await self.apply_channel_post_text_edit(
+                channel_id=channel_id,
+                message_id=message_id,
+                new_text=cur_text,
+                message_link=message_link,
+                media_attachments=cur_media,
+                chat_message_id=(chat_message_id or None),
                 text_format=cur_tf,
                 markup=cur_mk,
-                log_api_response_as=f"process_channel_post delayed channel mid={message_id}",
+                buttons_enabled=True,
+                log_outbound_payload=False,
             )
             if ok and kb_att:
                 self.config.register_tracked_post(
