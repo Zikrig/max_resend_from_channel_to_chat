@@ -821,6 +821,7 @@ class Config:
                     "saved_at": float(item.get("saved_at", 0)),
                     "chat_message_id": str(item.get("chat_message_id", "") or ""),
                     "media_attachments": ma,
+                    "buttons_enabled": bool(item.get("buttons_enabled", True)),
                 }
                 if tf in ("markdown", "html"):
                     row["text_format"] = tf
@@ -851,6 +852,7 @@ class Config:
         media_attachments: Optional[List[Dict[str, Any]]] = None,
         text_format: Optional[str] = None,
         markup: Optional[List[Dict[str, Any]]] = None,
+        buttons_enabled: Optional[bool] = None,
     ) -> None:
         self.prune_tracked_posts()
         now = time.time()
@@ -872,6 +874,11 @@ class Config:
             else:
                 p.pop("markup", None)
 
+        def apply_buttons_enabled_field(p: Dict[str, Any]) -> None:
+            if buttons_enabled is None:
+                return
+            p["buttons_enabled"] = bool(buttons_enabled)
+
         for p in self.tracked_posts:
             if int(p["channel_id"]) == int(channel_id) and str(p["message_id"]) == mid:
                 p["text"] = text
@@ -883,6 +890,7 @@ class Config:
                     p["media_attachments"] = media_attachments
                 apply_text_format(p)
                 apply_markup_field(p)
+                apply_buttons_enabled_field(p)
                 return
         entry: Dict[str, Any] = {
             "channel_id": int(channel_id),
@@ -895,6 +903,7 @@ class Config:
         }
         apply_text_format(entry)
         apply_markup_field(entry)
+        apply_buttons_enabled_field(entry)
         self.tracked_posts.append(entry)
 
     def find_tracked_post(self, channel_id: int, message_id: str) -> Optional[Dict[str, Any]]:
@@ -1110,6 +1119,7 @@ class MaxBot:
         chat_message_id: Optional[str] = None,
         text_format: Optional[str] = None,
         markup: Optional[List[Dict[str, Any]]] = None,
+        buttons_enabled: Optional[bool] = None,
         *,
         log_outbound_payload: bool = False,
     ) -> bool:
@@ -1117,7 +1127,10 @@ class MaxBot:
         if not binding:
             return False
         media = list(media_attachments or [])
-        kb = self.build_channel_keyboard_attachment(binding, message_link)
+        if buttons_enabled is False:
+            kb = []
+        else:
+            kb = self.build_channel_keyboard_attachment(binding, message_link)
         channel_attachments = media + kb
         if not await self.edit_message(
             str(message_id),
@@ -1359,6 +1372,7 @@ class MaxBot:
                     media_attachments=clean_attachments,
                     text_format=canon_tf if canon_tf is not None else "",
                     markup=canon_mk if canon_mk is not None else [],
+                    buttons_enabled=True,
                 )
                 self.config.save()
 
@@ -1597,6 +1611,7 @@ class MaxBot:
             chat_mid = (tr.get("chat_message_id") or "").strip()
             tf = normalize_text_format(tr.get("text_format"))
             mu = tracked_markup_for_api(tr)
+            buttons_enabled = bool(tr.get("buttons_enabled", True))
             ok = await self.apply_channel_post_text_edit(
                 cid,
                 mid,
@@ -1606,9 +1621,18 @@ class MaxBot:
                 chat_message_id=chat_mid or None,
                 text_format=tf,
                 markup=mu,
+                buttons_enabled=buttons_enabled,
             )
             if ok:
-                self.config.register_tracked_post(cid, mid, post_text, ml, media_attachments=new_media, text_format=tf)
+                self.config.register_tracked_post(
+                    cid,
+                    mid,
+                    post_text,
+                    ml,
+                    media_attachments=new_media,
+                    text_format=tf,
+                    buttons_enabled=buttons_enabled,
+                )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
                 self.post_edit_ref.pop(sender_id, None)
@@ -1634,6 +1658,7 @@ class MaxBot:
             tr = self.config.find_tracked_post(cid, mid)
             media = list(tr.get("media_attachments") or []) if tr else []
             chat_mid = (tr.get("chat_message_id") or "").strip() if tr else ""
+            buttons_enabled = bool(tr.get("buttons_enabled", True)) if tr else True
             admin_body = msg.get("body") or {}
             if not isinstance(admin_body, dict):
                 admin_body = {}
@@ -1699,6 +1724,7 @@ class MaxBot:
                 chat_message_id=chat_mid or None,
                 text_format=text_format,
                 markup=markup_for_edit,
+                buttons_enabled=buttons_enabled,
                 log_outbound_payload=True,
             )
             if ok:
@@ -1723,6 +1749,7 @@ class MaxBot:
                     media_attachments=media,
                     text_format=reg_tf if reg_tf is not None else "",
                     markup=reg_mk if reg_mk is not None else [],
+                    buttons_enabled=buttons_enabled,
                 )
                 self.config.save()
                 self.admin_states[sender_id] = AdminState.NONE
@@ -1830,9 +1857,18 @@ class MaxBot:
             return
         body = (p.get("text") or "").strip() or "(пустой текст)"
         ref = encode_post_ref(channel_id, message_id)
-        msg_text = f"Текст поста:\n\n{body}"
+        buttons_enabled = bool(p.get("buttons_enabled", True))
+        indicator = "🟢" if buttons_enabled else "🔴"
+        msg_text = f"Текст поста:\n\n{body}\n\nКнопки под постом: {indicator}"
         buttons = [
-            [{"type": "callback", "text": "Поменять текст", "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}"}],
+            [
+                {"type": "callback", "text": "Поменять текст", "payload": f"admin_post_edit:{ref}:{return_page}:{channel_id}"},
+                {
+                    "type": "callback",
+                    "text": ("🔴 Выключить кнопки" if buttons_enabled else "🟢 Включить кнопки"),
+                    "payload": f"admin_post_toggle_buttons:{ref}:{return_page}:{channel_id}",
+                },
+            ],
             [{"type": "callback", "text": "Поменять картинку", "payload": f"admin_post_edit_image:{ref}:{return_page}:{channel_id}"}],
             [{"type": "callback", "text": "Назад", "payload": f"admin_channel_posts:{channel_id}:{return_page}"}],
         ]
@@ -2073,6 +2109,69 @@ class MaxBot:
                 sender_id,
                 "Отправьте одно сообщение с новой картинкой (фото или файл изображения). Текст поста не меняется.",
             )
+        elif isinstance(payload, str) and payload.startswith("admin_post_toggle_buttons:"):
+            rest = payload[len("admin_post_toggle_buttons:") :]
+            parts = rest.rsplit(":", 2)
+            if len(parts) != 3:
+                return
+            ref, page_s, ch_s = parts[0], parts[1], parts[2]
+            try:
+                page = int(page_s)
+                list_ch = int(ch_s)
+            except ValueError:
+                return
+            dec = decode_post_ref(ref)
+            if not dec:
+                await self.send_message(sender_id, "Некорректная ссылка.")
+                return
+            cid, mid = dec
+            if int(cid) != int(list_ch):
+                await self.send_message(sender_id, "Несовпадение канала.")
+                await self.send_posts_list(sender_id, list_ch, page)
+                return
+            tr = self.config.find_tracked_post(cid, mid)
+            if not tr:
+                await self.send_message(sender_id, "Пост не найден или срок хранения истёк.")
+                await self.send_posts_list(sender_id, cid, page)
+                return
+            new_buttons_enabled = not bool(tr.get("buttons_enabled", True))
+            post_text = str(tr.get("text") or "")
+            message_link = str(tr.get("message_link") or "")
+            media = list(tr.get("media_attachments") or [])
+            chat_mid = (tr.get("chat_message_id") or "").strip()
+            tf = normalize_text_format(tr.get("text_format"))
+            mu = tracked_markup_for_api(tr)
+            ok = await self.apply_channel_post_text_edit(
+                cid,
+                mid,
+                post_text,
+                message_link,
+                media_attachments=media,
+                chat_message_id=chat_mid or None,
+                text_format=tf,
+                markup=mu,
+                buttons_enabled=new_buttons_enabled,
+            )
+            if not ok:
+                await self.send_message(sender_id, "Не удалось переключить кнопки у поста.")
+                return
+            self.config.register_tracked_post(
+                cid,
+                mid,
+                post_text,
+                message_link,
+                media_attachments=media,
+                text_format=tf,
+                markup=mu if mu is not None else [],
+                chat_message_id=chat_mid or "",
+                buttons_enabled=new_buttons_enabled,
+            )
+            self.config.save()
+            await self.send_message(
+                sender_id,
+                f"Кнопки у поста {'включены' if new_buttons_enabled else 'выключены'}.",
+            )
+            await self.send_post_detail(sender_id, cid, mid, page)
         elif isinstance(payload, str) and payload.startswith("admin_channel_detail:"):
             raw_id = payload.split(":", 1)[1]
             try:
