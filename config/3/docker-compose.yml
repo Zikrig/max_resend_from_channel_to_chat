@@ -1,0 +1,18 @@
+services:
+  bot:
+    build: .
+    container_name: promo_bot_max8087
+    restart: always
+    env_file:
+      - .env
+    # store.json на хосте: ./data/store.json (рядом с проектом, переживает пересборку)
+    environment:
+      DATA_JSON_PATH: /app/data/store.json
+    volumes:
+      - .:/app
+      - ./data:/app/data
+    ports:
+      - "8087:8080"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
