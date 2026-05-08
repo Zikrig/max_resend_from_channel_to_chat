@@ -1362,7 +1362,7 @@ class MaxBot:
                 markup=canon_mk,
                 log_api_response_as=f"process_channel_post channel mid={message_id}",
             )
-            if ok and kb_att:
+            if ok:
                 self.config.register_tracked_post(
                     int(channel_id),
                     str(message_id),
@@ -1372,7 +1372,7 @@ class MaxBot:
                     media_attachments=clean_attachments,
                     text_format=canon_tf if canon_tf is not None else "",
                     markup=canon_mk if canon_mk is not None else [],
-                    buttons_enabled=True,
+                    buttons_enabled=bool(kb_att),
                 )
                 self.config.save()
 
