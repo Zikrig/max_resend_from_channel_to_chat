@@ -1124,11 +1124,7 @@ class MaxBot:
         *,
         channel_id: int,
         message_id: str,
-        canon_text: str,
         message_link: str,
-        clean_attachments: List[Dict[str, Any]],
-        canon_tf: Optional[str],
-        canon_mk: Optional[List[Dict[str, Any]]],
         chat_message_id: str,
         delay_minutes: int,
     ) -> None:
@@ -1137,27 +1133,36 @@ class MaxBot:
             binding = self.config.binding_for_channel(channel_id)
             if not binding:
                 return
+            current = await self.fetch_message_for_edit(message_id)
+            if not current:
+                logger.warning(
+                    "Пропускаю отложенное добавление кнопок: не удалось получить актуальный пост channel_id=%s message_id=%s",
+                    channel_id,
+                    message_id,
+                )
+                return
+            cur_text, cur_tf, cur_mk, cur_media = current
             kb_att = self.build_channel_keyboard_attachment(binding, message_link)
-            channel_attachments = list(clean_attachments)
+            channel_attachments = list(cur_media)
             channel_attachments.extend(kb_att)
             ok = await self.edit_message(
                 message_id,
-                canon_text,
+                cur_text,
                 channel_attachments,
-                text_format=canon_tf,
-                markup=canon_mk,
+                text_format=cur_tf,
+                markup=cur_mk,
                 log_api_response_as=f"process_channel_post delayed channel mid={message_id}",
             )
             if ok and kb_att:
                 self.config.register_tracked_post(
                     int(channel_id),
                     str(message_id),
-                    canon_text,
+                    cur_text,
                     message_link,
                     chat_message_id=chat_message_id,
-                    media_attachments=clean_attachments,
-                    text_format=canon_tf if canon_tf is not None else "",
-                    markup=canon_mk if canon_mk is not None else [],
+                    media_attachments=cur_media,
+                    text_format=cur_tf if cur_tf is not None else "",
+                    markup=cur_mk if cur_mk is not None else [],
                     buttons_enabled=True,
                 )
                 self.config.save()
@@ -1234,6 +1239,29 @@ class MaxBot:
             return data if isinstance(data, dict) else None
         except Exception as e:
             logger.error("fetch_chat_by_id %s: %s", chat_id, e)
+            return None
+
+    async def fetch_message_for_edit(
+        self, message_id: str
+    ) -> Optional[tuple[str, Optional[str], Optional[List[Dict[str, Any]]], List[Dict[str, Any]]]]:
+        """Читает актуальный пост перед отложенным добавлением кнопок, чтобы не откатывать правки."""
+        try:
+            r = await self.client.get("/messages", params={"message_id": str(message_id)})
+            if r.status_code != 200:
+                logger.warning("GET /messages failed message_id=%s: %s %s", message_id, r.status_code, r.text)
+                return None
+            data = r.json()
+            message = data.get("message") if isinstance(data, dict) else None
+            body = message.get("body") if isinstance(message, dict) else None
+            if not isinstance(body, dict):
+                logger.warning("GET /messages: body missing for message_id=%s", message_id)
+                return None
+            text, tf, mk = message_body_text_format_markup(body)
+            attachments_raw = body.get("attachments") or []
+            media = clean_media_attachments_from_body(attachments_raw, strip_ref_fields=False)
+            return text, tf, mk, media
+        except Exception as e:
+            logger.error("fetch_message_for_edit %s: %s", message_id, e)
             return None
 
     async def find_chat_by_invite_url(self, url: str) -> tuple[Optional[int], Optional[Dict[str, Any]], str]:
@@ -1427,11 +1455,7 @@ class MaxBot:
                     self.apply_channel_post_buttons_after_delay(
                         channel_id=int(channel_id),
                         message_id=str(message_id),
-                        canon_text=canon_text,
                         message_link=message_link,
-                        clean_attachments=clean_attachments,
-                        canon_tf=canon_tf,
-                        canon_mk=canon_mk,
                         chat_message_id=chat_message_id,
                         delay_minutes=delay_minutes,
                     )
