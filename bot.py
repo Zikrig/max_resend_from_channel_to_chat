@@ -757,7 +757,6 @@ class Config:
                     qh = str(item.get("quiet_hours") or "").strip()
                 else:
                     qh = migrate_qh
-                buttons_enabled = bool(item.get("channel_buttons_enabled", True))
                 out.append(
                     {
                         "channel_id": cid,
@@ -767,7 +766,6 @@ class Config:
                         "comments_chat_title": (item.get("comments_chat_title") or "") or None,
                         "chat_mute_enabled": mute_en,
                         "quiet_hours": qh,
-                        "channel_buttons_enabled": buttons_enabled,
                     }
                 )
             return out
@@ -789,7 +787,6 @@ class Config:
                             "comments_chat_title": None,
                             "chat_mute_enabled": migrate_mute,
                             "quiet_hours": migrate_qh,
-                            "channel_buttons_enabled": True,
                         }
                     ]
         except (TypeError, ValueError):
@@ -1091,8 +1088,6 @@ class MaxBot:
         return buttons
 
     def build_channel_keyboard_attachment(self, binding: Dict[str, Any], message_link: str) -> List[Dict]:
-        if not bool(binding.get("channel_buttons_enabled", True)):
-            return []
         comments_invite_link = str(binding.get("comments_chat_link", "")).strip()
         channel_buttons_row: List[Dict] = []
         if comments_invite_link:
@@ -1545,7 +1540,6 @@ class MaxBot:
                 "comments_chat_title": ch_title or None,
                 "chat_mute_enabled": False,
                 "quiet_hours": "",
-                "channel_buttons_enabled": True,
             }
             self.config.channel_bindings.append(new_binding)
             self.config.save()
@@ -1946,21 +1940,14 @@ class MaxBot:
         ccid = int(b["comments_chat_id"])
         ct = b.get("channel_title") or f"id {cid}"
         cct = b.get("comments_chat_title") or f"id {ccid}"
-        buttons_enabled = bool(b.get("channel_buttons_enabled", True))
-        buttons_state = "включены" if buttons_enabled else "выключены"
-        buttons_toggle_text = "🔴 Кнопки: выкл" if buttons_enabled else "🟢 Кнопки: вкл"
         text = (
             f"Канал: {ct}\n"
             f"channel_id: {cid}\n\n"
             f"Чат комментариев: {cct}\n"
-            f"comments_chat_id: {ccid}\n\n"
-            f"Кнопки под постом: {buttons_state}"
+            f"comments_chat_id: {ccid}"
         )
         buttons = [
-            [
-                {"type": "callback", "text": "Mute", "payload": f"admin_channel_mute:{cid}"},
-                {"type": "callback", "text": buttons_toggle_text, "payload": f"admin_toggle_channel_buttons:{cid}"},
-            ],
+            [{"type": "callback", "text": "Mute", "payload": f"admin_channel_mute:{cid}"}],
             [{"type": "callback", "text": "Посты", "payload": f"admin_channel_posts:{cid}:0"}],
             [{"type": "callback", "text": "Удалить", "payload": f"admin_remove_channel:{cid}"}],
             [{"type": "callback", "text": "Назад", "payload": "admin_channels_submenu"}],
@@ -2205,24 +2192,6 @@ class MaxBot:
                 f"Mute для этого канала {'включен' if b['chat_mute_enabled'] else 'выключен'}",
             )
             await self.send_chat_mute_submenu(sender_id, tcid)
-        elif isinstance(payload, str) and payload.startswith("admin_toggle_channel_buttons:"):
-            raw_id = payload.split(":", 1)[1]
-            try:
-                bcid = int(raw_id)
-            except ValueError:
-                return
-            b = self.config.binding_for_channel(bcid)
-            if not b:
-                await self.send_message(sender_id, "Канал не найден.")
-                await self.send_channels_submenu(sender_id)
-                return
-            b["channel_buttons_enabled"] = not bool(b.get("channel_buttons_enabled", True))
-            self.config.save()
-            await self.send_message(
-                sender_id,
-                f"Кнопки под постом {'включены' if b['channel_buttons_enabled'] else 'выключены'}.",
-            )
-            await self.send_channel_detail_submenu(sender_id, bcid)
         elif isinstance(payload, str) and payload.startswith("admin_set_mute_range:"):
             raw_id = payload.split(":", 1)[1]
             try:
