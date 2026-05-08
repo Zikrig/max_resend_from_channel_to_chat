@@ -60,6 +60,7 @@ class AdminState(Enum):
     AWAITING_AD_LINK = "awaiting_ad_link"
     AWAITING_CHAT_TEXT = "awaiting_chat_text"
     AWAITING_COMMENTS_MESSAGE_BUTTON_TEXT = "awaiting_comments_message_button_text"
+    AWAITING_BUTTONS_DELAY_MINUTES = "awaiting_buttons_delay_minutes"
     AWAITING_BIND_CHANNEL_INVITE = "awaiting_bind_channel_invite"
     AWAITING_BIND_COMMENTS_INVITE = "awaiting_bind_comments_invite"
     AWAITING_NEW_ADMIN = "awaiting_new_admin"
@@ -684,6 +685,10 @@ class Config:
         self.comments_message_button_text = os.environ.get(
             "COMMENTS_MESSAGE_BUTTON_TEXT", "💬 Перейти к сообщению"
         )
+        try:
+            self.buttons_delay_minutes = max(0, int(os.environ.get("BUTTONS_DELAY_MINUTES", "0")))
+        except ValueError:
+            self.buttons_delay_minutes = 0
         self.root_admin_ids = parse_admin_ids(os.environ.get("ADMIN_USER_IDS", ""))
         self.admin_ids: List[int] = []
         self.channel_bindings: List[Dict[str, Any]] = []
@@ -710,6 +715,10 @@ class Config:
             self.comments_message_button_text = data.get(
                 "comments_message_button_text", self.comments_message_button_text
             )
+            try:
+                self.buttons_delay_minutes = max(0, int(data.get("buttons_delay_minutes", self.buttons_delay_minutes)))
+            except (TypeError, ValueError):
+                self.buttons_delay_minutes = 0
             self.admin_ids = parse_admin_ids(data.get("admin_ids", self.admin_ids))
             self.admin_ids = [admin_id for admin_id in self.admin_ids if admin_id not in self.root_admin_ids]
             self.channel_bindings = self._load_channel_bindings(data)
@@ -935,6 +944,7 @@ class Config:
                         "ad_url": self.ad_url,
                         "comments_chat_text": self.comments_chat_text,
                         "comments_message_button_text": self.comments_message_button_text,
+                        "buttons_delay_minutes": self.buttons_delay_minutes,
                         "channel_bindings": self.channel_bindings,
                         "admin_ids": self.admin_ids,
                         "tracked_posts": self.tracked_posts,
@@ -1108,6 +1118,61 @@ class MaxBot:
         if ad_buttons:
             copy_attachments.append({"type": "inline_keyboard", "payload": {"buttons": ad_buttons}})
         return copy_attachments
+
+    async def apply_channel_post_buttons_after_delay(
+        self,
+        *,
+        channel_id: int,
+        message_id: str,
+        canon_text: str,
+        message_link: str,
+        clean_attachments: List[Dict[str, Any]],
+        canon_tf: Optional[str],
+        canon_mk: Optional[List[Dict[str, Any]]],
+        chat_message_id: str,
+        delay_minutes: int,
+    ) -> None:
+        try:
+            await asyncio.sleep(delay_minutes * 60)
+            binding = self.config.binding_for_channel(channel_id)
+            if not binding:
+                return
+            kb_att = self.build_channel_keyboard_attachment(binding, message_link)
+            channel_attachments = list(clean_attachments)
+            channel_attachments.extend(kb_att)
+            ok = await self.edit_message(
+                message_id,
+                canon_text,
+                channel_attachments,
+                text_format=canon_tf,
+                markup=canon_mk,
+                log_api_response_as=f"process_channel_post delayed channel mid={message_id}",
+            )
+            if ok and kb_att:
+                self.config.register_tracked_post(
+                    int(channel_id),
+                    str(message_id),
+                    canon_text,
+                    message_link,
+                    chat_message_id=chat_message_id,
+                    media_attachments=clean_attachments,
+                    text_format=canon_tf if canon_tf is not None else "",
+                    markup=canon_mk if canon_mk is not None else [],
+                    buttons_enabled=True,
+                )
+                self.config.save()
+                logger.info(
+                    "Кнопки добавлены к посту channel_id=%s message_id=%s после задержки %s мин",
+                    channel_id,
+                    message_id,
+                    delay_minutes,
+                )
+        except Exception:
+            logger.exception(
+                "Не удалось добавить кнопки с задержкой channel_id=%s message_id=%s",
+                channel_id,
+                message_id,
+            )
 
     async def apply_channel_post_text_edit(
         self,
@@ -1349,32 +1414,53 @@ class MaxBot:
         if comments_chat_id and short_message_id:
             message_link = f"https://max.ru/c/{comments_chat_id}/{short_message_id}"
 
-        kb_att = self.build_channel_keyboard_attachment(binding, message_link)
-        channel_attachments = list(clean_attachments)
-        channel_attachments.extend(kb_att)
-
         if message_id:
-            ok = await self.edit_message(
-                message_id,
-                canon_text,
-                channel_attachments,
-                text_format=canon_tf,
-                markup=canon_mk,
-                log_api_response_as=f"process_channel_post channel mid={message_id}",
-            )
-            if ok:
-                self.config.register_tracked_post(
-                    int(channel_id),
-                    str(message_id),
-                    canon_text,
-                    message_link,
-                    chat_message_id=chat_message_id,
-                    media_attachments=clean_attachments,
-                    text_format=canon_tf if canon_tf is not None else "",
-                    markup=canon_mk if canon_mk is not None else [],
-                    buttons_enabled=bool(kb_att),
+            delay_minutes = max(0, int(getattr(self.config, "buttons_delay_minutes", 0)))
+            if delay_minutes > 0:
+                logger.info(
+                    "Отложенное добавление кнопок: channel_id=%s message_id=%s delay=%s мин",
+                    channel_id,
+                    message_id,
+                    delay_minutes,
                 )
-                self.config.save()
+                asyncio.create_task(
+                    self.apply_channel_post_buttons_after_delay(
+                        channel_id=int(channel_id),
+                        message_id=str(message_id),
+                        canon_text=canon_text,
+                        message_link=message_link,
+                        clean_attachments=clean_attachments,
+                        canon_tf=canon_tf,
+                        canon_mk=canon_mk,
+                        chat_message_id=chat_message_id,
+                        delay_minutes=delay_minutes,
+                    )
+                )
+            else:
+                kb_att = self.build_channel_keyboard_attachment(binding, message_link)
+                channel_attachments = list(clean_attachments)
+                channel_attachments.extend(kb_att)
+                ok = await self.edit_message(
+                    message_id,
+                    canon_text,
+                    channel_attachments,
+                    text_format=canon_tf,
+                    markup=canon_mk,
+                    log_api_response_as=f"process_channel_post channel mid={message_id}",
+                )
+                if ok and kb_att:
+                    self.config.register_tracked_post(
+                        int(channel_id),
+                        str(message_id),
+                        canon_text,
+                        message_link,
+                        chat_message_id=chat_message_id,
+                        media_attachments=clean_attachments,
+                        text_format=canon_tf if canon_tf is not None else "",
+                        markup=canon_mk if canon_mk is not None else [],
+                        buttons_enabled=True,
+                    )
+                    self.config.save()
 
     async def process_admin_message(self, msg: Dict[str, Any]) -> None:
         raw_sid = msg.get("sender", {}).get("user_id")
@@ -1531,6 +1617,21 @@ class MaxBot:
             self.config.save()
             self.admin_states[sender_id] = AdminState.NONE
             await self.send_message(sender_id, f"Текст кнопки к сообщению изменен: {text}")
+            await self.send_chat_link_submenu(sender_id)
+            return
+
+        if state == AdminState.AWAITING_BUTTONS_DELAY_MINUTES:
+            try:
+                delay = int(text)
+                if delay < 0:
+                    raise ValueError()
+            except ValueError:
+                await self.send_message(sender_id, "Введите целое число минут >= 0. Пример: 0 или 15")
+                return
+            self.config.buttons_delay_minutes = delay
+            self.config.save()
+            self.admin_states[sender_id] = AdminState.NONE
+            await self.send_message(sender_id, f"Задержка кнопок обновлена: {delay} мин")
             await self.send_chat_link_submenu(sender_id)
             return
 
@@ -1896,13 +1997,15 @@ class MaxBot:
         buttons = [
             [{"type": "callback", "text": "Текст: вход в чат", "payload": "admin_set_chat_text"}],
             [{"type": "callback", "text": "Текст: к сообщению", "payload": "admin_set_comments_message_button_text"}],
+            [{"type": "callback", "text": "Задержка кнопок (мин)", "payload": "admin_set_buttons_delay_minutes"}],
             [{"type": "callback", "text": "Назад", "payload": "admin_menu"}],
         ]
         text = (
             "Кнопки под постом в канале (одинаковые для всех подключённых каналов).\n"
             "Ссылку-приглашение в чат комментариев для каждого канала задаёте в разделе «Каналы».\n\n"
             f"Текст кнопки входа в чат: {self.config.comments_chat_text}\n"
-            f"Текст кнопки к сообщению: {self.config.comments_message_button_text}"
+            f"Текст кнопки к сообщению: {self.config.comments_message_button_text}\n"
+            f"Задержка перед добавлением кнопок: {self.config.buttons_delay_minutes} мин"
         )
         await self.send_message(user_id, text, [{"type": "inline_keyboard", "payload": {"buttons": buttons}}])
 
@@ -2232,6 +2335,13 @@ class MaxBot:
             await self.send_message(
                 sender_id,
                 "Введите новый текст кнопки, которая ведёт к конкретному сообщению в чате комментариев:",
+            )
+        elif payload == "admin_set_buttons_delay_minutes":
+            self.admin_states[sender_id] = AdminState.AWAITING_BUTTONS_DELAY_MINUTES
+            await self.send_message(
+                sender_id,
+                f"Введите задержку перед добавлением кнопок (в минутах, сейчас {self.config.buttons_delay_minutes}).\n"
+                "0 — без задержки.",
             )
         elif payload == "admin_add_admin":
             self.admin_states[sender_id] = AdminState.AWAITING_NEW_ADMIN
