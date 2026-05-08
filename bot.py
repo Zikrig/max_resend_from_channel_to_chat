@@ -1133,7 +1133,7 @@ class MaxBot:
             binding = self.config.binding_for_channel(channel_id)
             if not binding:
                 return
-            current = await self.fetch_message_for_edit(message_id)
+            current = await self.fetch_message_for_edit(channel_id, message_id)
             if not current:
                 logger.warning(
                     "Пропускаю отложенное добавление кнопок: не удалось получить актуальный пост channel_id=%s message_id=%s",
@@ -1242,27 +1242,54 @@ class MaxBot:
             return None
 
     async def fetch_message_for_edit(
-        self, message_id: str
+        self, channel_id: int, message_id: str
     ) -> Optional[tuple[str, Optional[str], Optional[List[Dict[str, Any]]], List[Dict[str, Any]]]]:
         """Читает актуальный пост перед отложенным добавлением кнопок, чтобы не откатывать правки."""
-        try:
-            r = await self.client.get("/messages", params={"message_id": str(message_id)})
-            if r.status_code != 200:
-                logger.warning("GET /messages failed message_id=%s: %s %s", message_id, r.status_code, r.text)
-                return None
-            data = r.json()
-            message = data.get("message") if isinstance(data, dict) else None
-            body = message.get("body") if isinstance(message, dict) else None
-            if not isinstance(body, dict):
-                logger.warning("GET /messages: body missing for message_id=%s", message_id)
-                return None
-            text, tf, mk = message_body_text_format_markup(body)
-            attachments_raw = body.get("attachments") or []
-            media = clean_media_attachments_from_body(attachments_raw, strip_ref_fields=False)
-            return text, tf, mk, media
-        except Exception as e:
-            logger.error("fetch_message_for_edit %s: %s", message_id, e)
-            return None
+        attempts = [
+            {"chat_id": int(channel_id), "message_ids": [str(message_id)]},
+            {"chat_id": int(channel_id), "message_ids": str(message_id)},
+            {"chatId": int(channel_id), "messageIds": [str(message_id)]},
+            {"chatId": int(channel_id), "messageIds": str(message_id)},
+        ]
+        for params in attempts:
+            try:
+                r = await self.client.get("/messages", params=params)
+                if r.status_code != 200:
+                    logger.warning(
+                        "GET /messages failed channel_id=%s message_id=%s params=%s: %s %s",
+                        channel_id,
+                        message_id,
+                        params,
+                        r.status_code,
+                        r.text,
+                    )
+                    continue
+                data = r.json()
+                message: Optional[Dict[str, Any]] = None
+                if isinstance(data, dict):
+                    m = data.get("message")
+                    if isinstance(m, dict):
+                        message = m
+                    elif isinstance(data.get("messages"), list) and data.get("messages"):
+                        first = data["messages"][0]
+                        if isinstance(first, dict):
+                            message = first
+                body = message.get("body") if isinstance(message, dict) else None
+                if not isinstance(body, dict):
+                    logger.warning(
+                        "GET /messages: body missing channel_id=%s message_id=%s params=%s",
+                        channel_id,
+                        message_id,
+                        params,
+                    )
+                    continue
+                text, tf, mk = message_body_text_format_markup(body)
+                attachments_raw = body.get("attachments") or []
+                media = clean_media_attachments_from_body(attachments_raw, strip_ref_fields=False)
+                return text, tf, mk, media
+            except Exception as e:
+                logger.error("fetch_message_for_edit %s/%s params=%s: %s", channel_id, message_id, params, e)
+        return None
 
     async def find_chat_by_invite_url(self, url: str) -> tuple[Optional[int], Optional[Dict[str, Any]], str]:
         norm = normalize_max_url(url)
