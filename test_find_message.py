@@ -31,7 +31,7 @@ def load_dotenv(path: str = ".env"):
 
 load_dotenv()
 
-API_BASE = "https://platform-api.max.ru"
+API_BASE = "https://platform-api2.max.ru"
 
 
 def find_message_by_text(token: str, chat_id: int, search_text: str, limit: int = 50) -> dict[str, Any] | None:

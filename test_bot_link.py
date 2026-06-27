@@ -15,7 +15,7 @@ import sys
 
 import httpx
 
-API_BASE = "https://platform-api.max.ru"
+API_BASE = "https://platform-api2.max.ru"
 
 
 def main() -> None:

@@ -22,7 +22,7 @@ from typing import Any
 
 import httpx
 
-API_BASE = "https://platform-api.max.ru"
+API_BASE = "https://platform-api2.max.ru"
 
 
 def fetch_all_chats(token: str, page_size: int = 100) -> list[dict[str, Any]]:

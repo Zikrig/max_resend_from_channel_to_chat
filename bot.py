@@ -29,7 +29,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.routing import Route
 
-API_BASE = "https://platform-api.max.ru"
+API_BASE = "https://platform-api2.max.ru"
 MOSCOW_TZ = ZoneInfo("Europe/Moscow")
 TRACKED_POST_TTL_SEC = 3 * 24 * 3600
 POSTS_PAGE_SIZE = 10
